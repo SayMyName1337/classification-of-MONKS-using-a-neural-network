@@ -46,13 +46,13 @@ class ExperimentWorker(QThread):
             self.status_updated.emit("Loading data...")
             # Import necessary functions from your monk.py
             from Monks import (load_monks_data, add_noise_to_features, handle_missing_values,
-                             create_ensemble_parallel, ensemble_predict, evaluate_model,
-                             benchmark_algorithms)
+                            create_ensemble_parallel, ensemble_predict, evaluate_model,
+                            benchmark_algorithms)
             
             # Load data
             X_train, y_train, X_test, y_test = load_monks_data(self.params['problem_number'])
             if X_train is None:
-                self.error_occurred.emit("Failed to load dataset. Please ensure the Monk's dataset files are in the current directory.")
+                self.error_occurred.emit("Failed to load dataset. Please ensure the Monk's dataset files are in the correct directory.")
                 return
             
             self.status_updated.emit("Preparing data...")
@@ -153,17 +153,40 @@ class ExperimentWorker(QThread):
             self.progress_updated.emit(100)
             self.status_updated.emit("Experiment completed successfully!")
             
-            # Save models if requested
+            # Save models ONLY if requested
             if self.params.get('save_models', False):
                 self.status_updated.emit("Saving models...")
                 model_dir = os.path.join(RESULTS_DIR, f"monk{self.params['problem_number']}_models")
                 if not os.path.exists(model_dir):
                     os.makedirs(model_dir)
                 
-                for i, model_path in enumerate(ensemble_models):
-                    model = load_model(model_path)
+                # Save each model from the ensemble
+                for i, model in enumerate(ensemble_models):
+                    # Check if model is already a path or an actual model object
+                    if isinstance(model, str):
+                        # It's a path, load the model from file
+                        model_obj = load_model(model)
+                        # Delete temporary file after loading
+                        if os.path.exists(model):
+                            os.remove(model)
+                    else:
+                        # It's already a model object
+                        model_obj = model
+                    
+                    # Save to the results directory
                     save_path = os.path.join(model_dir, f"ensemble_model_{i+1}.h5")
-                    model.save(save_path)
+                    model_obj.save(save_path)
+            else:
+                # If models are file paths, clean them up
+                for model in ensemble_models:
+                    if isinstance(model, str) and os.path.exists(model):
+                        os.remove(model)
+            
+            # Clean up any temporary model files that might have been created
+            for i in range(self.params['num_ensemble_models']):
+                temp_path = f'ensemble_model_{self.params["problem_number"]}_{i+1}.h5'
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
             
             # Emit results
             self.experiment_completed.emit(results)
@@ -171,6 +194,15 @@ class ExperimentWorker(QThread):
         except Exception as e:
             logger.error(f"Error in experiment worker: {str(e)}", exc_info=True)
             self.error_occurred.emit(f"An error occurred: {str(e)}")
+            
+            # Clean up any temporary model files that might have been created
+            try:
+                for i in range(self.params.get('num_ensemble_models', 5)):
+                    temp_path = f'ensemble_model_{self.params.get("problem_number", 1)}_{i+1}.h5'
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+            except Exception as cleanup_error:
+                logger.error(f"Error cleaning up model files: {str(cleanup_error)}")
 
 
 # Custom matplotlib canvas for embedding plots
