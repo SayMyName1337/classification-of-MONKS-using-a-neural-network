@@ -355,7 +355,7 @@ def visualize_results(accuracies, noise_level, noise_type):
         plt.legend()
         
         # Save the plot
-        plt.savefig(f'enhanced_monks_accuracy_with_{noise_type}_noise_{int(noise_level*100)}percent.png')
+        # plt.savefig(f'enhanced_monks_accuracy_with_{noise_type}_noise_{int(noise_level*100)}percent.png')
         logger.info(f"Visualization saved to 'enhanced_monks_accuracy_with_{noise_type}_noise_{int(noise_level*100)}percent.png'")
         
         # Show statistics summary
@@ -376,7 +376,7 @@ def visualize_results(accuracies, noise_level, noise_type):
         plt.figtext(0.7, 0.5, stats_text, bbox=dict(facecolor='white', alpha=0.5))
         
         # Save the statistics plot
-        plt.savefig(f'enhanced_monks_accuracy_stats_{noise_type}_noise_{int(noise_level*100)}percent.png')
+        # plt.savefig(f'enhanced_monks_accuracy_stats_{noise_type}_noise_{int(noise_level*100)}percent.png')
         logger.info(f"Statistics visualization saved to 'enhanced_monks_accuracy_stats_{noise_type}_noise_{int(noise_level*100)}percent.png'")
         
         plt.close('all')  # Close all figures to free memory
@@ -703,8 +703,8 @@ def benchmark_algorithms(X_train, y_train, X_test, y_test, problem_number, noise
     plt.ylabel('Accuracy (%)')
     plt.ylim(0, 105)  # Leave room for text
     plt.grid(axis='y', alpha=0.3)
-    plt.savefig(f'algorithm_comparison_monk{problem_number}' + 
-               (f'_{noise_type}_{int(noise_level*100)}' if noise_level > 0 else '') + '.png')
+    # plt.savefig(f'algorithm_comparison_monk{problem_number}' + 
+            #    (f'_{noise_type}_{int(noise_level*100)}' if noise_level > 0 else '') + '.png')
     
     return results_df
 
@@ -901,7 +901,7 @@ def main():
         
         # Save the summary plot
         summary_plot_file = f'monk{problem_number}_{noise_type}_noise_summary.png'
-        plt.savefig(summary_plot_file)
+        # plt.savefig(summary_plot_file)
         logger.info(f"Summary plot saved to {summary_plot_file}")
         
         # Show final results
