@@ -46,8 +46,11 @@ class ExperimentWorker(QThread):
             self.status_updated.emit("Loading data...")
             # Import necessary functions from your monk.py
             from Monks import (load_monks_data, add_noise_to_features, handle_missing_values,
-                            create_ensemble_parallel, ensemble_predict, evaluate_model,
-                            benchmark_algorithms)
+                            ensemble_predict, evaluate_model, benchmark_algorithms)
+            
+            # Only import create_ensemble_parallel if we need to create models
+            if not self.params.get('saved_model_paths'):
+                from Monks import create_ensemble_parallel
             
             # Load data
             X_train, y_train, X_test, y_test = load_monks_data(self.params['problem_number'])
@@ -70,20 +73,36 @@ class ExperimentWorker(QThread):
                 X_train_encoded, y_train_encoded, test_size=0.2, random_state=42
             )
             
-            self.status_updated.emit("Creating ensemble models...")
-            self.progress_updated.emit(30)
-            
-            # Create ensemble models
-            input_dim = X_train_encoded.shape[1]
-            ensemble_models = create_ensemble_parallel(
-                X_train_split, y_train_split, X_val, y_val,
-                input_dim, self.params['problem_number'], 
-                num_models=self.params['num_ensemble_models']
-            )
+            # Check if we have saved models
+            if self.params.get('saved_model_paths'):
+                self.status_updated.emit("Loading saved models...")
+                self.progress_updated.emit(20)
+                
+                # Load saved models
+                ensemble_models = []
+                for i, model_path in enumerate(self.params['saved_model_paths']):
+                    progress = 20 + int((i / len(self.params['saved_model_paths'])) * 20)
+                    self.progress_updated.emit(progress)
+                    model = load_model(model_path)
+                    ensemble_models.append(model)
+                
+                self.status_updated.emit(f"Loaded {len(ensemble_models)} saved models")
+            else:
+                # Create new ensemble models
+                self.status_updated.emit("Creating ensemble models...")
+                self.progress_updated.emit(30)
+                
+                input_dim = X_train_encoded.shape[1]
+                ensemble_models = create_ensemble_parallel(
+                    X_train_split, y_train_split, X_val, y_val,
+                    input_dim, self.params['problem_number'], 
+                    num_models=self.params['num_ensemble_models']
+                )
             
             self.status_updated.emit("Running experiments...")
             self.progress_updated.emit(60)
             
+            # Rest of the method remains unchanged...
             # Evaluate baseline performance
             _, baseline_predictions = ensemble_predict(ensemble_models, X_test_encoded)
             baseline_metrics = evaluate_model(y_test_encoded, baseline_predictions, "Baseline Ensemble")
@@ -96,7 +115,8 @@ class ExperimentWorker(QThread):
                 'mean_accuracies': [],
                 'std_accuracies': [],
                 'baseline_accuracy': baseline_accuracy,
-                'problem_number': self.params['problem_number']
+                'problem_number': self.params['problem_number'],
+                'used_saved_models': 'saved_model_paths' in self.params
             }
             
             # For each noise level
@@ -153,40 +173,24 @@ class ExperimentWorker(QThread):
             self.progress_updated.emit(100)
             self.status_updated.emit("Experiment completed successfully!")
             
-            # Save models ONLY if requested
-            if self.params.get('save_models', False):
+            # Save models ONLY if requested AND if we didn't use saved models
+            if self.params.get('save_models', False) and not self.params.get('saved_model_paths'):
                 self.status_updated.emit("Saving models...")
                 model_dir = os.path.join(RESULTS_DIR, f"monk{self.params['problem_number']}_models")
                 if not os.path.exists(model_dir):
                     os.makedirs(model_dir)
                 
-                # Save each model from the ensemble
+                # This section depends on what create_ensemble_parallel returns
+                # If it returns model objects:
                 for i, model in enumerate(ensemble_models):
-                    # Check if model is already a path or an actual model object
-                    if isinstance(model, str):
-                        # It's a path, load the model from file
-                        model_obj = load_model(model)
-                        # Delete temporary file after loading
-                        if os.path.exists(model):
-                            os.remove(model)
-                    else:
-                        # It's already a model object
-                        model_obj = model
-                    
-                    # Save to the results directory
                     save_path = os.path.join(model_dir, f"ensemble_model_{i+1}.h5")
-                    model_obj.save(save_path)
-            else:
-                # If models are file paths, clean them up
-                for model in ensemble_models:
-                    if isinstance(model, str) and os.path.exists(model):
-                        os.remove(model)
-            
-            # Clean up any temporary model files that might have been created
-            for i in range(self.params['num_ensemble_models']):
-                temp_path = f'ensemble_model_{self.params["problem_number"]}_{i+1}.h5'
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
+                    model.save(save_path)
+                
+                # Clean up any temporary files
+                for i in range(self.params['num_ensemble_models']):
+                    temp_path = f'ensemble_model_{self.params["problem_number"]}_{i+1}.h5'
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
             
             # Emit results
             self.experiment_completed.emit(results)
@@ -197,13 +201,13 @@ class ExperimentWorker(QThread):
             
             # Clean up any temporary model files that might have been created
             try:
-                for i in range(self.params.get('num_ensemble_models', 5)):
-                    temp_path = f'ensemble_model_{self.params.get("problem_number", 1)}_{i+1}.h5'
-                    if os.path.exists(temp_path):
-                        os.remove(temp_path)
+                if not self.params.get('saved_model_paths'):
+                    for i in range(self.params.get('num_ensemble_models', 5)):
+                        temp_path = f'ensemble_model_{self.params.get("problem_number", 1)}_{i+1}.h5'
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
             except Exception as cleanup_error:
                 logger.error(f"Error cleaning up model files: {str(cleanup_error)}")
-
 
 # Custom matplotlib canvas for embedding plots
 class MplCanvas(FigureCanvas):
@@ -410,6 +414,35 @@ class MonkClassifierGUI(QMainWindow):
         # Model configuration
         model_group = QGroupBox("Model Configuration")
         model_layout = QFormLayout()
+
+        # Load models section
+        load_models_group = QGroupBox("Saved Models")
+        load_models_layout = QVBoxLayout()
+
+        # Buttons layout
+        buttons_layout = QHBoxLayout()
+
+        # Load models button
+        self.load_models_btn = QPushButton("Load Models")
+        self.load_models_btn.setToolTip("Load previously saved ensemble models")
+        self.load_models_btn.clicked.connect(self.load_saved_models)
+        buttons_layout.addWidget(self.load_models_btn)
+
+        # Reset models button
+        self.reset_models_btn = QPushButton("Reset")
+        self.reset_models_btn.setToolTip("Clear loaded models")
+        self.reset_models_btn.clicked.connect(self.reset_loaded_models)
+        self.reset_models_btn.setEnabled(False)  # Initially disabled
+        buttons_layout.addWidget(self.reset_models_btn)
+
+        load_models_layout.addLayout(buttons_layout)
+
+        # Model info display
+        self.loaded_models_label = QLabel("No models loaded")
+        load_models_layout.addWidget(self.loaded_models_label)
+
+        load_models_group.setLayout(load_models_layout)
+        layout.addWidget(load_models_group)
         
         # Number of ensemble models
         self.ensemble_size_spin = QSpinBox()
@@ -685,6 +718,10 @@ class MonkClassifierGUI(QMainWindow):
             'run_benchmark': run_benchmark,
             'save_models': save_models
         }
+        
+        # Add saved model paths if available
+        if hasattr(self, 'saved_model_paths') and self.saved_model_paths:
+            params['saved_model_paths'] = self.saved_model_paths
         
         # Update UI
         self.run_button.setEnabled(False)
@@ -995,6 +1032,93 @@ class MonkClassifierGUI(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Export Error", f"Error exporting benchmark figure: {str(e)}")
             logger.error(f"Error exporting benchmark figure: {str(e)}", exc_info=True)
+    
+    def load_saved_models(self):
+        """Load previously saved ensemble models"""
+        # First, determine which problem we're working with
+        problem_number = self.problem_combo.currentIndex() + 1
+        
+        # Default directory for saved models
+        model_dir = os.path.join(RESULTS_DIR, f"monk{problem_number}_models")
+        
+        # Show dialog if the default directory doesn't exist
+        if not os.path.exists(model_dir):
+            # Let the user select a directory
+            model_dir = QFileDialog.getExistingDirectory(
+                self, "Select Models Directory", RESULTS_DIR,
+                QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
+            )
+            
+            if not model_dir:  # User canceled
+                return
+        
+        # Check if the directory contains model files
+        model_files = [f for f in os.listdir(model_dir) if f.endswith('.h5')]
+        
+        if not model_files:
+            QMessageBox.warning(
+                self, "No Models Found", 
+                f"No saved models (.h5 files) found in {model_dir}.\n"
+                "Please save models first or select a different directory."
+            )
+            return
+        
+        # Ask if the user wants to use these models
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Question)
+        msg.setText(f"Found {len(model_files)} model(s) in {model_dir}.")
+        msg.setInformativeText("Do you want to load these models for the experiment?")
+        msg.setWindowTitle("Load Models")
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        if msg.exec_() != QMessageBox.Yes:
+            return
+        
+        try:
+            # Store the model paths for later use
+            self.saved_model_paths = [os.path.join(model_dir, f) for f in model_files]
+            
+            # Update UI
+            self.loaded_models_label.setText(f"Loaded {len(model_files)} model(s) from {model_dir}")
+            self.ensemble_size_spin.setValue(len(model_files))
+            self.ensemble_size_spin.setEnabled(False)  # Disable changing ensemble size
+            self.reset_models_btn.setEnabled(True)     # Enable reset button
+            self.problem_combo.setEnabled(False)       # Disable problem selection (to prevent mismatch)
+            
+            # Log
+            logger.info(f"Loaded {len(model_files)} model(s) from {model_dir}")
+            
+            # Show success message
+            QMessageBox.information(
+                self, "Models Loaded", 
+                f"Successfully loaded {len(model_files)} model(s).\n"
+                "The experiment will use these models instead of training new ones."
+            )
+        
+        except Exception as e:
+            QMessageBox.critical(self, "Error Loading Models", f"Error loading models: {str(e)}")
+            logger.error(f"Error loading models: {str(e)}", exc_info=True)
+            # Reset
+            self.reset_loaded_models()
+    
+    def reset_loaded_models(self):
+        """Reset the loaded models state"""
+        if hasattr(self, 'saved_model_paths') and self.saved_model_paths:
+            # Reset model paths
+            self.saved_model_paths = None
+            
+            # Update UI
+            self.loaded_models_label.setText("No models loaded")
+            self.ensemble_size_spin.setEnabled(True)
+            self.reset_models_btn.setEnabled(False)
+            
+            # Update problem combo box to be enabled
+            self.problem_combo.setEnabled(True)
+            
+            # Log the reset
+            logger.info("Loaded models have been reset")
+            
+            # Inform the user
+            self.statusBar().showMessage("Loaded models have been reset", 3000)
 
 # New module for main function
 def main():
