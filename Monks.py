@@ -710,28 +710,78 @@ def benchmark_algorithms(X_train, y_train, X_test, y_test, problem_number, noise
 
 def train_single_model(i, X_train, y_train, X_val, y_val, input_dim, problem_number):
     """
-        Train a single model for the ensemble
+    Train a single model for the ensemble with improved architecture
     """
     # Configure logging for this process
     process_logger = logging.getLogger(f"ensemble_model_{i}")
     process_logger.info(f"Training ensemble model {i+1}")
     
-    # Create model with variations as in your original code
-    model = Sequential([
-        Input(shape=(input_dim,)),
-        Dense(64 + i*16, activation='elu'),
-        BatchNormalization(),
-        Dropout(0.3),
-        Dense(32 + i*8, activation='elu'),
-        BatchNormalization(),
-        Dropout(0.2),
-        Dense(1, activation='sigmoid')
-    ])
+    # Create model with enhanced architecture
+    # Adjust network depth and width based on problem complexity
+    if problem_number == 2:  # MONK-2 is more complex
+        depth = 4  # More layers for complex problem
+    else:
+        depth = 3  # Standard depth for MONK-1 and MONK-3
     
-    # Use different learning rates for diversity
-    lr = 0.001 * (1.0 + i * 0.5)
+    # Choose different activation functions for different models in ensemble
+    activations = ['elu', 'relu', 'selu', 'swish']
+    activation = activations[i % len(activations)]
+    
+    # Create a base model
+    inputs = Input(shape=(input_dim,))
+    
+    # First layer
+    x = Dense(64 + i*16, activation=activation)(inputs)
+    x = BatchNormalization()(x)
+    x = Dropout(0.3)(x)
+    
+    # Middle layers - vary based on depth and model index
+    for j in range(depth - 2):
+        # Gradually decrease layer width
+        units = int(64 / (j+2) * (i+1))
+        units = max(units, 16)  # Ensure minimum width
+        
+        x = Dense(units, activation=activation)(x)
+        x = BatchNormalization()(x)
+        
+        # Vary dropout rate
+        dropout_rate = 0.2 - (j * 0.05)  # Less dropout in deeper layers
+        dropout_rate = max(dropout_rate, 0.1)  # Minimum dropout
+        x = Dropout(dropout_rate)(x)
+        
+        # Add a residual connection for every second layer if enough depth
+        if j % 2 == 1 and depth > 3:
+            # Ensure dimensions match for residual connection
+            res_x = Dense(units, activation=None)(x)
+            x = tf.keras.layers.add([x, res_x])
+            x = tf.keras.layers.Activation(activation)(x)
+    
+    # Final hidden layer
+    x = Dense(32, activation=activation)(x)
+    x = BatchNormalization()(x)
+    x = Dropout(0.2)(x)
+    
+    # Output layer (binary classification)
+    # outputs = Dense(1, activation='sigmoid')(outputs)
+    outputs = Dense(1, activation='sigmoid')(x)
+    
+    model = tf.keras.Model(inputs, outputs)
+    
+    # Use different learning rates and optimizers for diversity
+    lr = 0.001 * (1.0 + i * 0.3)
+    
+    # Choose different optimizers
+    optimizer_choice = i % 3
+    if optimizer_choice == 0:
+        optimizer = tf.keras.optimizers.Adam(learning_rate=lr)
+    elif optimizer_choice == 1:
+        optimizer = tf.keras.optimizers.RMSprop(learning_rate=lr)
+    else:
+        optimizer = tf.keras.optimizers.SGD(learning_rate=lr, momentum=0.9)
+    
+    # Compile model
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
+        optimizer=optimizer,
         loss='binary_crossentropy',
         metrics=['accuracy']
     )
@@ -743,19 +793,25 @@ def train_single_model(i, X_train, y_train, X_val, y_val, input_dim, problem_num
         restore_best_weights=True
     )
     
-    lr_schedule = ReduceLROnPlateau(
+    # Use cosine annealing learning rate schedule
+    lr_schedule = tf.keras.callbacks.ReduceLROnPlateau(
         monitor='val_loss',
         factor=0.5,
         patience=5,
         min_lr=1e-6
     )
     
+    # Optionally add a cosine annealing schedule for better convergence
+    cosine_lr = tf.keras.callbacks.LearningRateScheduler(
+        lambda epoch: lr * (0.5 * (1 + np.cos(epoch / 100 * np.pi)))
+    )
+    
     # Train the model
-    batch_size = 16 + i * 8
+    batch_size = 16 + i * 4  # Smaller increment for batch size
     model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
-        epochs=100,
+        epochs=150,  # Increase epochs but let early stopping decide
         batch_size=batch_size,
         callbacks=[early_stopping, lr_schedule],
         verbose=0  # Set to 0 to avoid messy output

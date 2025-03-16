@@ -1032,7 +1032,7 @@ class MonkClassifierGUI(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Export Error", f"Error exporting benchmark figure: {str(e)}")
             logger.error(f"Error exporting benchmark figure: {str(e)}", exc_info=True)
-    
+        
     def load_saved_models(self):
         """Load previously saved ensemble models"""
         # First, determine which problem we're working with
