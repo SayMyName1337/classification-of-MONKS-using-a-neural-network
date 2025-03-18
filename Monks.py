@@ -355,7 +355,7 @@ def visualize_results(accuracies, noise_level, noise_type):
         plt.legend()
         
         # Save the plot
-        # plt.savefig(f'enhanced_monks_accuracy_with_{noise_type}_noise_{int(noise_level*100)}percent.png')
+        plt.savefig(f'enhanced_monks_accuracy_with_{noise_type}_noise_{int(noise_level*100)}percent.png')
         logger.info(f"Visualization saved to 'enhanced_monks_accuracy_with_{noise_type}_noise_{int(noise_level*100)}percent.png'")
         
         # Show statistics summary
@@ -376,7 +376,7 @@ def visualize_results(accuracies, noise_level, noise_type):
         plt.figtext(0.7, 0.5, stats_text, bbox=dict(facecolor='white', alpha=0.5))
         
         # Save the statistics plot
-        # plt.savefig(f'enhanced_monks_accuracy_stats_{noise_type}_noise_{int(noise_level*100)}percent.png')
+        plt.savefig(f'enhanced_monks_accuracy_stats_{noise_type}_noise_{int(noise_level*100)}percent.png')
         logger.info(f"Statistics visualization saved to 'enhanced_monks_accuracy_stats_{noise_type}_noise_{int(noise_level*100)}percent.png'")
         
         plt.close('all')  # Close all figures to free memory
@@ -703,8 +703,8 @@ def benchmark_algorithms(X_train, y_train, X_test, y_test, problem_number, noise
     plt.ylabel('Accuracy (%)')
     plt.ylim(0, 105)  # Leave room for text
     plt.grid(axis='y', alpha=0.3)
-    # plt.savefig(f'algorithm_comparison_monk{problem_number}' + 
-            #    (f'_{noise_type}_{int(noise_level*100)}' if noise_level > 0 else '') + '.png')
+    plt.savefig(f'algorithm_comparison_monk{problem_number}' + 
+               (f'_{noise_type}_{int(noise_level*100)}' if noise_level > 0 else '') + '.png')
     
     return results_df
 
@@ -719,7 +719,7 @@ def train_single_model(i, X_train, y_train, X_val, y_val, input_dim, problem_num
     # Create model with enhanced architecture
     # Adjust network depth and width based on problem complexity
     if problem_number == 2:  # MONK-2 is more complex
-        depth = 4  # More layers for complex problem
+        depth = 5  # More layers for complex problem
     else:
         depth = 3  # Standard depth for MONK-1 and MONK-3
     
@@ -859,7 +859,7 @@ def main():
             noise_type = input("Enter noise type: ").strip().lower()
         
         # Number of models in ensemble
-        num_ensemble_models = get_user_input("Enter number of models for ensemble (1-10): ", 1, 10, is_int=True)
+        num_ensemble_models = get_user_input("Enter number of models for ensemble (1-20): ", 1, 20, is_int=True)
         
         logger.info(f"User selected Monk's problem {problem_number}")
         logger.info(f"User-defined noise levels: from {min_noise*100}% to {max_noise*100}% in {noise_steps} steps")
@@ -879,11 +879,6 @@ def main():
         
         # Encode features if necessary
         logger.info("Preparing data for training...")
-        # Convert to numpy arrays for consistency
-        # X_train_encoded = X_train.values
-        # X_test_encoded = X_test.values
-        # y_train_encoded = y_train.values
-        # y_test_encoded = y_test.values
 
         # Convert to numpy arrays for consistency
         X_train_encoded = X_train.values.astype(np.float32)
@@ -957,7 +952,7 @@ def main():
         
         # Save the summary plot
         summary_plot_file = f'monk{problem_number}_{noise_type}_noise_summary.png'
-        # plt.savefig(summary_plot_file)
+        plt.savefig(summary_plot_file)
         logger.info(f"Summary plot saved to {summary_plot_file}")
         
         # Show final results
