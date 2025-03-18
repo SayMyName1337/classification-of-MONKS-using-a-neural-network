@@ -897,7 +897,7 @@ def run_optimal_classifier(problem_number, run_hyperopt=True, n_trials=50, ensem
     # Сохраняем ансамбль моделей
     ensemble.save()
     
-    # 5. Анализ устойчивости к шуму (по желанию)
+    # 5. Анализ устойчивости к шуму
     if analyze_noise:
         logger.info("Анализ устойчивости к шуму")
         
@@ -1077,7 +1077,7 @@ def run_optimal_classifier(problem_number, run_hyperopt=True, n_trials=50, ensem
         # Анализируем устойчивость к шуму
         noise_analysis = NoiseAnalyzer.analyze_noise_resistance(
             ensemble, X_test, y_test,
-            noise_types=['gaussian', 'uniform', 'impulse'],  # Избегаем 'missing', требующего специальной обработки
+            noise_types=['gaussian', 'uniform', 'impulse', 'missing'],  # Избегаем 'missing', требующего специальной обработки
             noise_levels=[0, 0.1, 0.2, 0.3, 0.4, 0.5],
             n_experiments=3
         )
