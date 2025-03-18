@@ -68,7 +68,7 @@ class DataLoader:
             columns = ['class', 'a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'id']
             
             # Загрузка обучающих данных
-            train_file = f"monks-{problem_number}.train"
+            train_file = f"Dataset\\monks-{problem_number}.train"
             if not os.path.exists(train_file):
                 logger.error(f"Файл набора данных не найден: {train_file}")
                 raise FileNotFoundError(f"Файл набора данных не найден: {train_file}")
@@ -77,7 +77,7 @@ class DataLoader:
             train_data = train_data.drop('id', axis=1)  # Удаление ID столбца
             
             # Загрузка тестовых данных
-            test_file = f"monks-{problem_number}.test"
+            test_file = f"Dataset\\monks-{problem_number}.test"
             if not os.path.exists(test_file):
                 logger.error(f"Файл набора данных не найден: {test_file}")
                 raise FileNotFoundError(f"Файл набора данных не найден: {test_file}")
@@ -958,7 +958,7 @@ def run_optimal_classifier(problem_number, run_hyperopt=True, n_trials=50, ensem
                             # Замена на NaN (требует предобработки перед использованием)
                             X_noisy[idx, feature_idx] = np.nan
                 
-                # Если есть пропущенные значения, заполняем их средними
+                # Если есть пропущенные значения, заполняем их средними (импутация)
                 if noise_type == 'missing':
                     for j in range(n_features):
                         mask = np.isnan(X_noisy[:, j])
