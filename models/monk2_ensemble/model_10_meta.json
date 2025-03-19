@@ -1,0 +1,24 @@
+{
+  "params": {
+    "n_layers": 2.0,
+    "units_first": 128.0,
+    "activation": "sigmoid",
+    "use_batch_norm": 0.0,
+    "dropout_rate": 0.16899595377080484,
+    "use_residual": 0.0,
+    "learning_rate": 0.004274773578578742,
+    "batch_size": 128.0,
+    "optimizer": "rmsprop",
+    "use_regularization": 1.0,
+    "l1_factor": 0.0001,
+    "l2_factor": 0.0
+  },
+  "layer_config": [
+    128,
+    96,
+    64,
+    32
+  ],
+  "val_accuracy": 0.6176470518112183,
+  "epochs_trained": 300
+}

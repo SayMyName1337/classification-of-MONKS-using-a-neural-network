@@ -559,6 +559,29 @@ class EnsembleClassifier:
                 optimizer = RMSprop(learning_rate=float(params['learning_rate']))
             elif opt_choice == 2:
                 optimizer = SGD(learning_rate=float(params['learning_rate']), momentum=0.9)
+            elif opt_choice == 3:
+                # Добавляем AdamW для еще большего разнообразия, если доступен
+                try:
+                    # Пробуем новый путь (TF 2.11+)
+                    optimizer = tf.keras.optimizers.AdamW(
+                        learning_rate=float(params['learning_rate']),
+                        weight_decay=0.001
+                    )
+                except AttributeError:
+                    try:
+                        # Пробуем старый путь (до TF 2.11)
+                        optimizer = tf.keras.optimizers.experimental.AdamW(
+                            learning_rate=float(params['learning_rate']),
+                            weight_decay=0.001
+                        )
+                    except (AttributeError, ImportError):
+                        # Если AdamW недоступен, используем обычный Adam
+                        logger.warning("AdamW не найден, используем Adam с L2-регуляризацией")
+                        optimizer = Adam(
+                            learning_rate=float(params['learning_rate']),
+                            beta_1=0.9,
+                            beta_2=0.999
+                        )
             else:
                 # Добавляем AdamW для еще большего разнообразия
                 optimizer = tf.keras.optimizers.experimental.AdamW(
@@ -572,8 +595,6 @@ class EnsembleClassifier:
                 loss='binary_crossentropy',
                 metrics=['accuracy']
             )
-            
-            # УЛУЧШЕНИЕ: Более разнообразные схемы обучения с большим количеством эпох
             
             # Колбэки для обучения
             callbacks = [
@@ -903,6 +924,96 @@ class EnsembleClassifier:
         model.add(Dense(1, activation='sigmoid'))
         
         return model
+    
+    def build_stacked_ensemble(self, X_train, y_train, X_val, y_val, initial_ensemble_size=10, final_ensemble_size=5):
+        """
+        Строит ансамбль с динамическим отбором лучших моделей по принципу стекинга.
+        
+        Args:
+            X_train: Обучающие признаки
+            y_train: Обучающие метки
+            X_val: Валидационные признаки
+            y_val: Валидационные метки
+            initial_ensemble_size: Начальное количество моделей для отбора
+            final_ensemble_size: Финальное количество моделей в ансамбле
+        """
+        logger.info(f"Построение стекингового ансамбля: начинаем с {initial_ensemble_size} моделей, "
+                f"отбираем {final_ensemble_size} лучших")
+        
+        # Сохраняем текущее значение num_models
+        original_num_models = self.num_models
+        
+        # Устанавливаем большее количество для первоначального обучения
+        self.num_models = initial_ensemble_size
+        
+        # Обучаем начальный набор моделей
+        self.build_ensemble(X_train, y_train, X_val, y_val)
+        
+        # Если у нас уже меньше моделей, чем требуется в финальном ансамбле, оставляем как есть
+        if len(self.models) <= final_ensemble_size:
+            logger.info(f"После обучения осталось {len(self.models)} моделей, меньше или равно требуемым {final_ensemble_size}")
+            self.num_models = original_num_models  # Восстанавливаем исходное значение
+            return
+        
+        logger.info(f"Начальный ансамбль из {len(self.models)} моделей обучен, приступаем к отбору")
+        
+        # Прогнозы для валидационной выборки от каждой модели
+        val_predictions = []
+        for i, model in enumerate(self.models):
+            # Получаем probabilistic predictions, не бинарные
+            pred = model.predict(X_val, verbose=0)
+            val_predictions.append(pred)
+        
+        # Преобразуем в numpy массив для удобства
+        val_predictions = np.array(val_predictions).squeeze()  # [n_models, n_samples]
+        
+        # Подготовка для greedy selection
+        selected_models = []  # Индексы выбранных моделей
+        remaining_models = list(range(len(self.models)))  # Начинаем со всех моделей
+        
+        # Итеративно выбираем модели, снижающие ошибку ансамбля
+        for i in range(final_ensemble_size):
+            best_accuracy = 0
+            best_model_idx = -1
+            
+            # Проверяем каждую оставшуюся модель
+            for model_idx in remaining_models:
+                # Временно добавляем модель к выбранным
+                temp_selected = selected_models + [model_idx]
+                
+                # Вычисляем среднее предсказание для текущего набора моделей
+                if len(temp_selected) > 0:
+                    temp_ensemble_pred = np.mean(val_predictions[temp_selected], axis=0)
+                    temp_binary_pred = (temp_ensemble_pred > 0.5).astype(int)
+                    
+                    # Вычисляем точность
+                    accuracy = accuracy_score(y_val, temp_binary_pred)
+                    
+                    # Если это лучшая модель на текущий момент, запоминаем её
+                    if accuracy > best_accuracy:
+                        best_accuracy = accuracy
+                        best_model_idx = model_idx
+            
+            # Добавляем лучшую модель к выбранным и удаляем из оставшихся
+            if best_model_idx != -1:
+                selected_models.append(best_model_idx)
+                remaining_models.remove(best_model_idx)
+                logger.info(f"Шаг {i+1}: Добавлена модель {best_model_idx} с точностью {best_accuracy:.4f}")
+            else:
+                logger.warning(f"Не удалось найти модель, улучшающую ансамбль на шаге {i+1}")
+                break
+        
+        # Обновляем ансамбль, оставляя только выбранные модели
+        self.models = [self.models[idx] for idx in selected_models]
+        
+        # Если у нас есть валидационные точности, обновляем и их
+        if hasattr(self, 'val_accuracies'):
+            self.val_accuracies = [self.val_accuracies[idx] for idx in selected_models]
+        
+        # Восстанавливаем исходное значение num_models
+        self.num_models = original_num_models
+        
+        logger.info(f"Финальный ансамбль состоит из {len(self.models)} моделей")
 
 def run_optimal_classifier(problem_number, run_hyperopt=True, n_trials=50, ensemble_size=5, 
                           analyze_noise=True, run_comparative=True,
@@ -961,20 +1072,61 @@ def run_optimal_classifier(problem_number, run_hyperopt=True, n_trials=50, ensem
             else:
                 logger.warning("Файл с результатами оптимизации не найден, используем значения по умолчанию")
                 # Значения по умолчанию для каждой задачи
-                best_params = {
-                    'n_layers': 3,
-                    'units_first': 128 if problem_number == 2 else 64,
-                    'activation': 'elu',
-                    'use_batch_norm': True,
-                    'dropout_rate': 0.3,
-                    'use_residual': True,
-                    'learning_rate': 0.001,
-                    'batch_size': 32,
-                    'optimizer': 'adam',
-                    'use_regularization': True,
-                    'l1_factor': 1e-5,
-                    'l2_factor': 1e-4,
-                }
+                if problem_number == 1:
+                    # MONK-1: (a1 = a2) OR (a5 = 1)
+                    # Относительно простое правило, подходит среднего размера сеть с ELU
+                    default_params = {
+                        'n_layers': 2,
+                        'units_first': 64,
+                        'activation': 'elu',
+                        'use_batch_norm': True,
+                        'dropout_rate': 0.2,  # Меньше дропаут для более простой задачи
+                        'use_residual': False,
+                        'learning_rate': 0.001,
+                        'batch_size': 32,
+                        'optimizer': 'adam',
+                        'use_regularization': False,
+                        'l1_factor': 0,
+                        'l2_factor': 0
+                    }
+                elif problem_number == 2:
+                    # MONK-2: Ровно два атрибута имеют значение 1
+                    # Более сложное правило XOR-типа, требует более глубокой сети
+                    default_params = {
+                        'n_layers': 4,  # Более глубокая сеть для сложной задачи
+                        'units_first': 128,  # Больше нейронов
+                        'activation': 'selu',  # Self-normalizing функция активации
+                        'use_batch_norm': True,
+                        'dropout_rate': 0.3,
+                        'use_residual': True,  # Остаточные связи помогают с градиентами
+                        'learning_rate': 0.0005,  # Меньшая скорость обучения для более стабильного обучения
+                        'batch_size': 16,  # Меньший размер батча для лучшего обобщения
+                        'optimizer': 'adam',
+                        'use_regularization': True,
+                        'l1_factor': 1e-5,
+                        'l2_factor': 1e-4,
+                    }
+                else:  # MONK-3
+                    # MONK-3: (a5 = 3 AND a4 = 1) OR (a5 ≠ 4 AND a2 ≠ 3)
+                    # Комбинация AND и OR с отрицаниями
+                    default_params = {
+                        'n_layers': 3,
+                        'units_first': 96,
+                        'activation': 'relu',
+                        'use_batch_norm': True,
+                        'dropout_rate': 0.25,
+                        'use_residual': False,
+                        'learning_rate': 0.001,
+                        'batch_size': 32,
+                        'optimizer': 'adam',
+                        'use_regularization': True,
+                        'l1_factor': 0,
+                        'l2_factor': 1e-5,
+                    }
+
+                # Присваиваем параметры по умолчанию, если не удалось загрузить
+                best_params = default_params
+
         except Exception as e:
             logger.error(f"Ошибка при загрузке гиперпараметров: {str(e)}")
             # Используем значения по умолчанию
@@ -996,7 +1148,16 @@ def run_optimal_classifier(problem_number, run_hyperopt=True, n_trials=50, ensem
     # Построение и обучение ансамбля моделей
     logger.info(f"Создание ансамбля из {ensemble_size} моделей")
     ensemble = EnsembleClassifier(problem_number, base_params=best_params, num_models=ensemble_size)
-    ensemble.build_ensemble(X_train, y_train, X_val, y_val)
+
+    # Если размер ансамбля больше 3, используем стекинговый подход
+    if ensemble_size > 3:
+        initial_size = min(ensemble_size * 2, 15)  # Обучаем в 2 раза больше моделей для отбора
+        ensemble.build_stacked_ensemble(X_train, y_train, X_val, y_val, 
+                                    initial_ensemble_size=initial_size, 
+                                    final_ensemble_size=ensemble_size)
+    else:
+        # Для небольших ансамблей используем обычный подход
+        ensemble.build_ensemble(X_train, y_train, X_val, y_val)
     
     # Оценка на тестовой выборке
     logger.info("Оценка ансамбля на тестовой выборке")

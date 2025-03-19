@@ -1,0 +1,17 @@
+{
+  "problem_number": 2,
+  "num_models": 20,
+  "base_params": {
+    "n_layers": 2.0,
+    "units_first": 128.0,
+    "activation": "tanh",
+    "use_batch_norm": 0.0,
+    "dropout_rate": 0.18538266542028187,
+    "use_residual": 0.0,
+    "learning_rate": 0.0040201165730166305,
+    "batch_size": 32.0,
+    "optimizer": "rmsprop",
+    "use_regularization": 0.0
+  },
+  "input_shape": 73
+}

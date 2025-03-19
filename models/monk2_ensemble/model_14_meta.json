@@ -1,0 +1,22 @@
+{
+  "params": {
+    "n_layers": 2.0,
+    "units_first": 128.0,
+    "activation": "tanh",
+    "use_batch_norm": 0.0,
+    "dropout_rate": 0.1562132904409542,
+    "use_residual": 0.0,
+    "learning_rate": 0.005036204104592161,
+    "batch_size": 64.0,
+    "optimizer": "rmsprop",
+    "use_regularization": 1.0,
+    "l1_factor": 0.0001,
+    "l2_factor": 0.0
+  },
+  "layer_config": [
+    256,
+    64
+  ],
+  "val_accuracy": 1.0,
+  "epochs_trained": 300
+}
