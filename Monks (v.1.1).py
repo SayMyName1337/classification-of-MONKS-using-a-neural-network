@@ -6,6 +6,12 @@ import seaborn as sns
 import tensorflow as tf
 import optuna
 from optuna.integration import TFKerasPruningCallback
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.svm import SVC
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.neural_network import MLPClassifier
+from sklearn.metrics import accuracy_score
 from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, roc_curve, auc
@@ -772,7 +778,8 @@ class EnsembleClassifier:
         
         return model
 
-def run_optimal_classifier(problem_number, run_hyperopt=True, n_trials=50, ensemble_size=5, analyze_noise=True,
+def run_optimal_classifier(problem_number, run_hyperopt=True, n_trials=50, ensemble_size=5, 
+                          analyze_noise=True, run_comparative=True,
                           min_noise=0.0, max_noise=0.5, noise_step=0.1):
     """
     Запускает полный процесс оптимизации, обучения и анализа классификатора.
@@ -783,6 +790,7 @@ def run_optimal_classifier(problem_number, run_hyperopt=True, n_trials=50, ensem
         n_trials: Количество попыток для оптимизации гиперпараметров
         ensemble_size: Размер ансамбля моделей
         analyze_noise: Выполнять ли анализ устойчивости к шуму
+        run_comparative: Выполнять ли сравнительный анализ с другими алгоритмами
         min_noise: Минимальный уровень шума (0.0 - 1.0)
         max_noise: Максимальный уровень шума (0.0 - 1.0)
         noise_step: Шаг изменения уровня шума (0.0 - 1.0)
@@ -793,7 +801,7 @@ def run_optimal_classifier(problem_number, run_hyperopt=True, n_trials=50, ensem
     logger.info(f"=== Запуск оптимального классификатора для MONK-{problem_number} ===")
     start_time = time.time()
     
-    # 1. Загрузка и подготовка данных
+    # Загрузка и подготовка данных
     X_train, y_train, X_test, y_test = DataLoader.load_monks_data(problem_number)
     logger.info(f"Загружены данные: {X_train.shape[1]} признаков")
     
@@ -808,7 +816,7 @@ def run_optimal_classifier(problem_number, run_hyperopt=True, n_trials=50, ensem
     X_val = np.asarray(X_val, dtype=np.float32)
     y_val = np.asarray(y_val, dtype=np.float32)
     
-    # 2. Оптимизация гиперпараметров (или загрузка ранее найденных)
+    # Оптимизация гиперпараметров или загрузка ранее найденных
     if run_hyperopt:
         logger.info("Запуск оптимизации гиперпараметров")
         best_params = HyperOptimizer.optimize_hyperparameters(
@@ -859,12 +867,12 @@ def run_optimal_classifier(problem_number, run_hyperopt=True, n_trials=50, ensem
                 'l2_factor': 0
             }
     
-    # 3. Построение и обучение ансамбля моделей
+    # Построение и обучение ансамбля моделей
     logger.info(f"Создание ансамбля из {ensemble_size} моделей")
     ensemble = EnsembleClassifier(problem_number, base_params=best_params, num_models=ensemble_size)
     ensemble.build_ensemble(X_train, y_train, X_val, y_val)
     
-    # 4. Оценка на тестовой выборке
+    # Оценка на тестовой выборке
     logger.info("Оценка ансамбля на тестовой выборке")
     results = ensemble.evaluate(X_test, y_test)
     
@@ -899,8 +907,25 @@ def run_optimal_classifier(problem_number, run_hyperopt=True, n_trials=50, ensem
     # Сохраняем ансамбль моделей
     ensemble.save()
     
-    # 5. Анализ устойчивости к шуму
-    if analyze_noise:
+    # Сравнительный анализ с другими алгоритмами
+    if run_comparative:
+        logger.info("Сравнительный анализ с другими алгоритмами")
+        comparative = ComparativeAnalyzer(ensemble, problem_number)
+        comparative.train_baseline_models(X_train, y_train)
+        
+        # Создаем массив уровней шума на основе параметров
+        noise_levels = np.arange(min_noise, max_noise + noise_step/2, noise_step).tolist()
+        
+        # Проводим сравнительный анализ
+        comparative_results = comparative.analyze_noise_resistance(
+            X_test, y_test,
+            noise_types=['gaussian', 'uniform', 'impulse', 'missing'],
+            noise_levels=noise_levels,
+            n_experiments=3
+        )
+    
+    # 5. Анализ устойчивости к шуму отдельной модели
+    if analyze_noise and not run_comparative:
         logger.info("Анализ устойчивости к шуму")
         
         # Создаем класс для анализа шума
@@ -1103,6 +1128,442 @@ def run_optimal_classifier(problem_number, run_hyperopt=True, n_trials=50, ensem
     
     return ensemble
 
+class ComparativeAnalyzer:
+    """Класс для сравнительного анализа различных алгоритмов в условиях шума."""
+    
+    def __init__(self, ensemble_model, problem_number):
+        """
+        Инициализация анализатора.
+        
+        Args:
+            ensemble_model: Обученный ансамбль моделей
+            problem_number: Номер задачи MONK
+        """
+        self.ensemble_model = ensemble_model
+        self.problem_number = problem_number
+        self.models = {}
+        self.model_names = []
+        self.results_dir = Path("./results")
+        self.results_dir.mkdir(exist_ok=True)
+        
+        # Добавляем ансамбль в словарь моделей
+        self.models["Ensemble NN"] = ensemble_model
+        self.model_names.append("Ensemble NN")
+        
+        # Логирование
+        logger.info(f"Инициализирован ComparativeAnalyzer для MONK-{problem_number}")
+    
+    def train_baseline_models(self, X_train, y_train):
+        """
+        Обучает базовые модели для сравнения.
+        
+        Args:
+            X_train: Обучающие признаки
+            y_train: Обучающие метки
+        """
+        logger.info("Обучение базовых моделей для сравнения")
+        
+        # Приводим данные к нужному типу
+        X_train = np.asarray(X_train, dtype=np.float32)
+        y_train = np.asarray(y_train, dtype=np.float32)
+        
+        # Настройки для разных моделей MONK
+        if self.problem_number == 2:
+            # Более сложная задача MONK-2
+            rf_estimators = 200
+            gb_estimators = 200
+            mlp_hidden_layer_sizes = (100, 50, 25)
+        else:
+            # Более простые задачи MONK-1 и MONK-3
+            rf_estimators = 100
+            gb_estimators = 100
+            mlp_hidden_layer_sizes = (64, 32)
+        
+        # Одиночная нейронная сеть
+        logger.info("Обучение одиночной нейронной сети")
+        single_nn = MLPClassifier(
+            hidden_layer_sizes=mlp_hidden_layer_sizes, 
+            activation='relu', 
+            solver='adam', 
+            alpha=0.0001,
+            batch_size='auto', 
+            learning_rate='adaptive',
+            max_iter=500,
+            random_state=42
+        )
+        single_nn.fit(X_train, y_train)
+        self.models["Single NN"] = single_nn
+        self.model_names.append("Single NN")
+        
+        # Random Forest
+        logger.info("Обучение Random Forest")
+        rf = RandomForestClassifier(
+            n_estimators=rf_estimators, 
+            max_depth=None, 
+            min_samples_split=2,
+            random_state=42, 
+            n_jobs=-1
+        )
+        rf.fit(X_train, y_train)
+        self.models["Random Forest"] = rf
+        self.model_names.append("Random Forest")
+        
+        # Support Vector Machine
+        logger.info("Обучение SVM")
+        svm = SVC(
+            kernel='rbf', 
+            C=1.0, 
+            gamma='scale', 
+            probability=True,
+            random_state=42
+        )
+        svm.fit(X_train, y_train)
+        self.models["SVM"] = svm
+        self.model_names.append("SVM")
+        
+        # Gradient Boosting
+        logger.info("Обучение Gradient Boosting")
+        gb = GradientBoostingClassifier(
+            n_estimators=gb_estimators, 
+            learning_rate=0.1, 
+            max_depth=3,
+            random_state=42
+        )
+        gb.fit(X_train, y_train)
+        self.models["Gradient Boosting"] = gb
+        self.model_names.append("Gradient Boosting")
+        
+        # k-Nearest Neighbors
+        logger.info("Обучение KNN")
+        knn = KNeighborsClassifier(
+            n_neighbors=5, 
+            weights='distance', 
+            n_jobs=-1
+        )
+        knn.fit(X_train, y_train)
+        self.models["KNN"] = knn
+        self.model_names.append("KNN")
+        
+        # Логистическая регрессия
+        logger.info("Обучение Logistic Regression")
+        lr = LogisticRegression(
+            C=1.0, 
+            max_iter=1000, 
+            random_state=42, 
+            n_jobs=-1
+        )
+        lr.fit(X_train, y_train)
+        self.models["Logistic Regression"] = lr
+        self.model_names.append("Logistic Regression")
+        
+        logger.info(f"Обучено {len(self.models)} моделей для сравнения")
+    
+    def predict_with_model(self, model, X):
+        """
+        Делает предсказания моделью, обрабатывая особые случаи.
+        
+        Args:
+            model: Модель для прогнозирования
+            X: Данные для прогнозирования
+            
+        Returns:
+            Предсказанные метки
+        """
+        X = np.asarray(X, dtype=np.float32)
+        
+        # Особый случай для ансамбля
+        if model == self.ensemble_model:
+            y_pred, _ = model.predict(X)
+            return y_pred
+        
+        # Для SVM и логистической регрессии
+        if isinstance(model, (SVC, LogisticRegression)):
+            return model.predict(X)
+        
+        # Для остальных моделей
+        return model.predict(X)
+    
+    def analyze_noise_resistance(self, X_test, y_test, noise_types=None, noise_levels=None, n_experiments=3):
+        """
+        Анализирует устойчивость различных моделей к шуму.
+        
+        Args:
+            X_test: Тестовые признаки
+            y_test: Тестовые метки
+            noise_types: Список типов шума для тестирования
+            noise_levels: Список уровней шума для тестирования
+            n_experiments: Количество экспериментов для каждой комбинации
+            
+        Returns:
+            Словарь с результатами анализа
+        """
+        if noise_types is None:
+            noise_types = ['gaussian', 'uniform', 'impulse', 'missing']
+            
+        if noise_levels is None:
+            noise_levels = [0, 0.1, 0.2, 0.3, 0.4, 0.5]
+        
+        logger.info(f"Сравнительный анализ устойчивости к шуму: {len(self.models)} моделей, " 
+                  f"{len(noise_types)} типов шума, {len(noise_levels)} уровней, {n_experiments} экспериментов")
+        
+        # Проверяем, что у нас есть модели для сравнения
+        if len(self.models) <= 1:
+            logger.warning("Нет базовых моделей для сравнения. Сначала выполните train_baseline_models().")
+            return None
+        
+        # Подготавливаем структуру для результатов
+        results = {
+            'noise_types': noise_types,
+            'noise_levels': noise_levels,
+            'model_names': self.model_names,
+            'accuracies': {}
+        }
+        
+        # Для каждого типа шума
+        for noise_type in noise_types:
+            results['accuracies'][noise_type] = {}
+            
+            # Для каждой модели
+            for model_name in self.model_names:
+                results['accuracies'][noise_type][model_name] = []
+                
+                # Для каждого уровня шума
+                for noise_level in noise_levels:
+                    level_accuracies = []
+                    
+                    # Повторяем эксперимент несколько раз
+                    for exp in range(n_experiments):
+                        try:
+                            # Добавляем шум к тестовым данным
+                            X_noisy = self.add_noise(X_test, noise_level, noise_type)
+                            
+                            # Получаем предсказания
+                            model = self.models[model_name]
+                            y_pred = self.predict_with_model(model, X_noisy)
+                            
+                            # Рассчитываем точность
+                            accuracy = accuracy_score(y_test, y_pred)
+                            level_accuracies.append(accuracy)
+                        except Exception as e:
+                            logger.error(f"Ошибка при тестировании {model_name} с шумом {noise_type} {noise_level}: {str(e)}")
+                            level_accuracies.append(np.nan)
+                    
+                    # Сохраняем средний результат
+                    mean_accuracy = np.nanmean(level_accuracies)
+                    std_accuracy = np.nanstd(level_accuracies)
+                    
+                    results['accuracies'][noise_type][model_name].append({
+                        'level': float(noise_level),
+                        'mean_accuracy': float(mean_accuracy),
+                        'std_accuracy': float(std_accuracy),
+                        'experiments': [float(acc) for acc in level_accuracies]
+                    })
+                    
+                    logger.info(f"Модель {model_name}, шум '{noise_type}' уровня {noise_level:.1f}: "
+                             f"точность = {mean_accuracy:.4f} (±{std_accuracy:.4f})")
+        
+        # Сохраняем результаты в JSON
+        import json
+        with open(self.results_dir / f"comparative_analysis_monk{self.problem_number}.json", 'w') as f:
+            json.dump(results, f, indent=2)
+        
+        # Визуализируем и сохраняем результаты
+        self.visualize_comparative_results(results)
+        
+        return results
+    
+    def add_noise(self, X, noise_level, noise_type='gaussian'):
+        """
+        Добавляет шум к признакам.
+        
+        Args:
+            X: Входные признаки
+            noise_level: Уровень шума (0-1)
+            noise_type: Тип шума ('gaussian', 'uniform', 'impulse', 'missing')
+            
+        Returns:
+            Данные с добавленным шумом
+        """
+        if noise_level <= 0:
+            return X
+                
+        X_noisy = X.copy()
+        n_samples, n_features = X.shape
+        
+        # Количество примеров для добавления шума (согласно уровню шума)
+        n_noisy_samples = int(noise_level * n_samples)
+        noisy_indices = np.random.choice(n_samples, n_noisy_samples, replace=False)
+        
+        # Статистики признаков для реалистичного шума
+        feature_means = np.mean(X, axis=0)
+        feature_stds = np.std(X, axis=0)
+        feature_mins = np.min(X, axis=0)
+        feature_maxs = np.max(X, axis=0)
+        
+        # Для каждого зашумляемого примера
+        for idx in noisy_indices:
+            # Выбираем случайное количество признаков для зашумления
+            n_features_to_noise = np.random.randint(1, n_features + 1)
+            features_to_noise = np.random.choice(n_features, n_features_to_noise, replace=False)
+            
+            # Добавляем шум к выбранным признакам
+            for feature_idx in features_to_noise:
+                feature_range = feature_maxs[feature_idx] - feature_mins[feature_idx]
+                
+                if noise_type == 'gaussian':
+                    # Гауссовский шум, масштабируемый к стандартному отклонению признака
+                    noise = np.random.normal(0, feature_stds[feature_idx])
+                    X_noisy[idx, feature_idx] += noise
+                    
+                elif noise_type == 'uniform':
+                    # Равномерный шум в пределах диапазона признака
+                    noise = np.random.uniform(-0.5, 0.5) * feature_range
+                    X_noisy[idx, feature_idx] += noise
+                    
+                elif noise_type == 'impulse':
+                    # Импульсный шум - замена на экстремальные значения
+                    impulse_type = np.random.choice(['min', 'max', 'extreme'])
+                    if impulse_type == 'min':
+                        X_noisy[idx, feature_idx] = feature_mins[feature_idx]
+                    elif impulse_type == 'max':
+                        X_noisy[idx, feature_idx] = feature_maxs[feature_idx]
+                    else:  # extreme
+                        extreme_factor = np.random.choice([-2, 2])
+                        X_noisy[idx, feature_idx] = feature_means[feature_idx] + extreme_factor * feature_stds[feature_idx]
+                        
+                elif noise_type == 'missing':
+                    # Замена на NaN (требует предобработки перед использованием)
+                    X_noisy[idx, feature_idx] = np.nan
+        
+        # Если есть пропущенные значения, заполняем их средними
+        if noise_type == 'missing':
+            for j in range(n_features):
+                mask = np.isnan(X_noisy[:, j])
+                X_noisy[mask, j] = np.mean(X_noisy[~mask, j])
+        
+        return X_noisy
+    
+    def visualize_comparative_results(self, results):
+        """
+        Визуализирует результаты сравнительного анализа.
+        
+        Args:
+            results: Словарь с результатами анализа
+        """
+        noise_types = results['noise_types']
+        noise_levels = results['noise_levels']
+        model_names = results['model_names']
+        
+        # Создаем отдельный график для каждого типа шума
+        for noise_type in noise_types:
+            plt.figure(figsize=(12, 8))
+            
+            # Цветовая схема для моделей
+            colors = plt.cm.tab10(np.linspace(0, 1, len(model_names)))
+            
+            # Для каждой модели
+            for i, model_name in enumerate(model_names):
+                # Извлекаем данные
+                model_data = results['accuracies'][noise_type][model_name]
+                levels = [data['level'] for data in model_data]
+                accuracies = [data['mean_accuracy'] for data in model_data]
+                errors = [data['std_accuracy'] for data in model_data]
+                
+                # Строим линию с ошибками
+                plt.errorbar(
+                    levels, 
+                    accuracies, 
+                    yerr=errors, 
+                    marker='o' if model_name == "Ensemble NN" else 's',
+                    linestyle='-' if model_name == "Ensemble NN" else '--',
+                    linewidth=2 if model_name == "Ensemble NN" else 1,
+                    markersize=8 if model_name == "Ensemble NN" else 6,
+                    capsize=5,
+                    color=colors[i],
+                    label=model_name
+                )
+            
+            # Настраиваем график
+            plt.title(f'Сравнительный анализ устойчивости к шуму {noise_type.capitalize()} для MONK-{self.problem_number}', fontsize=16)
+            plt.xlabel('Уровень шума', fontsize=14)
+            plt.ylabel('Точность', fontsize=14)
+            plt.ylim(0, 1.05)
+            plt.xlim(-0.02, max(noise_levels) + 0.02)
+            plt.grid(True, alpha=0.3)
+            plt.legend(fontsize=12)
+            
+            # Аннотации для наилучшей и наихудшей моделей на каждом уровне шума
+            for i, level in enumerate(noise_levels):
+                if level == 0:
+                    continue  # Пропускаем базовый уровень
+                
+                # Находим лучшую и худшую модель для этого уровня
+                level_accuracies = {}
+                for model_name in model_names:
+                    level_accuracies[model_name] = results['accuracies'][noise_type][model_name][i]['mean_accuracy']
+                
+                best_model = max(level_accuracies, key=level_accuracies.get)
+                worst_model = min(level_accuracies, key=level_accuracies.get)
+                
+                # Аннотация для лучшей модели
+                if i == len(noise_levels) - 1:  # Только для последнего уровня
+                    plt.annotate(
+                        f"Лучшая: {best_model}",
+                        xy=(level, level_accuracies[best_model]),
+                        xytext=(level, level_accuracies[best_model] + 0.05),
+                        fontsize=10,
+                        arrowprops=dict(arrowstyle="->", color='green'),
+                        color='green'
+                    )
+            
+            # Сохраняем график
+            plt.tight_layout()
+            plt.savefig(self.results_dir / f"comparative_{noise_type}_monk{self.problem_number}.png", dpi=300)
+            plt.close()
+        
+        # Сводный график по всем типам шума для ансамбля
+        plt.figure(figsize=(12, 8))
+        
+        # Цветовая схема для типов шума
+        colors = plt.cm.tab10(np.linspace(0, 1, len(noise_types)))
+        
+        # Для каждого типа шума
+        for i, noise_type in enumerate(noise_types):
+            # Извлекаем данные для ансамбля
+            model_data = results['accuracies'][noise_type]["Ensemble NN"]
+            levels = [data['level'] for data in model_data]
+            accuracies = [data['mean_accuracy'] for data in model_data]
+            errors = [data['std_accuracy'] for data in model_data]
+            
+            # Строим линию с ошибками
+            plt.errorbar(
+                levels, 
+                accuracies, 
+                yerr=errors, 
+                marker='o',
+                linestyle='-',
+                linewidth=2,
+                markersize=8,
+                capsize=5,
+                color=colors[i],
+                label=f'{noise_type.capitalize()} Noise'
+            )
+        
+        # Настраиваем график
+        plt.title(f'Устойчивость ансамбля к различным типам шума для MONK-{self.problem_number}', fontsize=16)
+        plt.xlabel('Уровень шума', fontsize=14)
+        plt.ylabel('Точность', fontsize=14)
+        plt.ylim(0, 1.05)
+        plt.xlim(-0.02, max(noise_levels) + 0.02)
+        plt.grid(True, alpha=0.3)
+        plt.legend(fontsize=12)
+        
+        # Сохраняем график
+        plt.tight_layout()
+        plt.savefig(self.results_dir / f"ensemble_noise_comparison_monk{self.problem_number}.png", dpi=300)
+        plt.close()
+
+
 if __name__ == "__main__":
     print("=== Запуск оптимального классификатора для набора данных MONK ===")
     
@@ -1143,14 +1604,17 @@ if __name__ == "__main__":
         except ValueError:
             print("Пожалуйста, введите целое число.")
     
-    analyze_noise = input("Выполнить анализ устойчивости к шуму? (y/n, по умолчанию: y): ").lower() != 'n'
+    # Опция выбора типа анализа (только шум или сравнительный)
+    analyze_option = input("Выберите тип анализа:\n1. Только анализ шума\n2. Сравнительный анализ с другими алгоритмами\nВыбор (1/2, по умолчанию: 2): ") or "2"
+    analyze_noise = analyze_option == "1"
+    run_comparative = analyze_option == "2"
     
-    # Новые параметры для настройки шума
+    # Если выбран анализ шума, запрашиваем параметры шума
     min_noise = 0.0
     max_noise = 0.5
     noise_step = 0.1
     
-    if analyze_noise:
+    if analyze_noise or run_comparative:
         print("\n=== Настройка параметров шума ===")
         while True:
             try:
@@ -1186,7 +1650,7 @@ if __name__ == "__main__":
         noise_levels = np.arange(min_noise, max_noise + noise_step/2, noise_step)
         print(f"\nБудут рассчитаны следующие уровни шума: {[f'{level*100:.1f}%' for level in noise_levels]}")
     
-    # Запуск классификатора с новыми параметрами
+    # Запуск классификатора
     print(f"\nЗапуск классификатора для MONK-{problem_number}...")
     try:
         ensemble = run_optimal_classifier(
@@ -1195,6 +1659,7 @@ if __name__ == "__main__":
             n_trials=n_trials, 
             ensemble_size=ensemble_size, 
             analyze_noise=analyze_noise,
+            run_comparative=run_comparative,
             min_noise=min_noise,
             max_noise=max_noise,
             noise_step=noise_step
