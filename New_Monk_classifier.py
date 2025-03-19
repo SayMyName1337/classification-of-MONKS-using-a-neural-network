@@ -772,9 +772,8 @@ class EnsembleClassifier:
         
         return model
 
-# ... Остальной код без изменений ...
-
-def run_optimal_classifier(problem_number, run_hyperopt=True, n_trials=50, ensemble_size=5, analyze_noise=True):
+def run_optimal_classifier(problem_number, run_hyperopt=True, n_trials=50, ensemble_size=5, analyze_noise=True,
+                          min_noise=0.0, max_noise=0.5, noise_step=0.1):
     """
     Запускает полный процесс оптимизации, обучения и анализа классификатора.
     
@@ -784,6 +783,9 @@ def run_optimal_classifier(problem_number, run_hyperopt=True, n_trials=50, ensem
         n_trials: Количество попыток для оптимизации гиперпараметров
         ensemble_size: Размер ансамбля моделей
         analyze_noise: Выполнять ли анализ устойчивости к шуму
+        min_noise: Минимальный уровень шума (0.0 - 1.0)
+        max_noise: Максимальный уровень шума (0.0 - 1.0)
+        noise_step: Шаг изменения уровня шума (0.0 - 1.0)
         
     Returns:
         EnsembleClassifier: Обученный ансамбль моделей
@@ -972,7 +974,7 @@ def run_optimal_classifier(problem_number, run_hyperopt=True, n_trials=50, ensem
                     noise_types = ['gaussian', 'uniform', 'impulse']
                     
                 if noise_levels is None:
-                    noise_levels = [0, 0.1, 0.2, 0.3, 0.4, 0.5]
+                    noise_levels = np.arange(min_noise, max_noise + noise_step/2, noise_step).tolist()
                     
                 logger.info(f"Анализ устойчивости к шуму: {len(noise_types)} типов, {len(noise_levels)} уровней, {n_experiments} экспериментов")
                 
@@ -1074,6 +1076,9 @@ def run_optimal_classifier(problem_number, run_hyperopt=True, n_trials=50, ensem
                 plt.savefig(RESULTS_DIR / f"noise_resistance_monk{problem_number}.png", dpi=300)
                 plt.close()
         
+        # Создаем массив уровней шума на основе параметров
+        noise_levels = np.arange(min_noise, max_noise + noise_step/2, noise_step).tolist()
+
         # Анализируем устойчивость к шуму
         noise_analysis = NoiseAnalyzer.analyze_noise_resistance(
             ensemble, X_test, y_test,
@@ -1140,7 +1145,48 @@ if __name__ == "__main__":
     
     analyze_noise = input("Выполнить анализ устойчивости к шуму? (y/n, по умолчанию: y): ").lower() != 'n'
     
-    # Запуск классификатора
+    # Новые параметры для настройки шума
+    min_noise = 0.0
+    max_noise = 0.5
+    noise_step = 0.1
+    
+    if analyze_noise:
+        print("\n=== Настройка параметров шума ===")
+        while True:
+            try:
+                min_noise = float(input("Минимальный уровень шума в % (по умолчанию: 0): ") or "0") / 100
+                if 0 <= min_noise <= 1:
+                    break
+                else:
+                    print("Пожалуйста, введите значение от 0 до 100.")
+            except ValueError:
+                print("Пожалуйста, введите число.")
+                
+        while True:
+            try:
+                max_noise = float(input("Максимальный уровень шума в % (по умолчанию: 50): ") or "50") / 100
+                if min_noise <= max_noise <= 1:
+                    break
+                else:
+                    print(f"Пожалуйста, введите значение от {min_noise*100} до 100.")
+            except ValueError:
+                print("Пожалуйста, введите число.")
+                
+        while True:
+            try:
+                noise_step = float(input("Шаг изменения уровня шума в % (по умолчанию: 10): ") or "10") / 100
+                if 0 < noise_step <= (max_noise - min_noise + 0.0001):
+                    break
+                else:
+                    print(f"Пожалуйста, введите положительное значение, не превышающее {(max_noise - min_noise) * 100:.1f}%.")
+            except ValueError:
+                print("Пожалуйста, введите число.")
+        
+        # Показываем пользователю рассчитанные уровни шума
+        noise_levels = np.arange(min_noise, max_noise + noise_step/2, noise_step)
+        print(f"\nБудут рассчитаны следующие уровни шума: {[f'{level*100:.1f}%' for level in noise_levels]}")
+    
+    # Запуск классификатора с новыми параметрами
     print(f"\nЗапуск классификатора для MONK-{problem_number}...")
     try:
         ensemble = run_optimal_classifier(
@@ -1148,7 +1194,10 @@ if __name__ == "__main__":
             run_hyperopt=run_hyperopt, 
             n_trials=n_trials, 
             ensemble_size=ensemble_size, 
-            analyze_noise=analyze_noise
+            analyze_noise=analyze_noise,
+            min_noise=min_noise,
+            max_noise=max_noise,
+            noise_step=noise_step
         )
         
         print("\n=== Обучение и оценка завершены ===")
