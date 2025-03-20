@@ -1,12 +1,12 @@
 {
   "params": {
-    "n_layers": 2.0,
-    "units_first": 128.0,
+    "n_layers": 4.0,
+    "units_first": 256.0,
     "activation": "elu",
     "use_batch_norm": 0.0,
-    "dropout_rate": 0.2172728838892202,
-    "use_residual": 0.0,
-    "learning_rate": 0.0010838085211497337,
+    "dropout_rate": 0.3078426323871395,
+    "use_residual": 1.0,
+    "learning_rate": 0.002250234446402592,
     "batch_size": 16.0,
     "optimizer": "rmsprop",
     "use_regularization": 1.0,
@@ -14,9 +14,9 @@
     "l2_factor": 0.0
   },
   "layer_config": [
-    128,
     256,
-    128
+    512,
+    256
   ],
   "val_accuracy": 1.0,
   "epochs_trained": 300

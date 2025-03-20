@@ -1,17 +1,19 @@
 {
   "problem_number": 2,
-  "num_models": 20,
+  "num_models": 5,
   "base_params": {
-    "n_layers": 2.0,
-    "units_first": 128.0,
-    "activation": "tanh",
+    "n_layers": 4.0,
+    "units_first": 256.0,
+    "activation": "relu",
     "use_batch_norm": 0.0,
-    "dropout_rate": 0.18538266542028187,
-    "use_residual": 0.0,
-    "learning_rate": 0.0040201165730166305,
+    "dropout_rate": 0.27595241391820113,
+    "use_residual": 1.0,
+    "learning_rate": 0.008346681738172256,
     "batch_size": 32.0,
     "optimizer": "rmsprop",
-    "use_regularization": 0.0
+    "use_regularization": 1.0,
+    "l1_factor": 1.568968201744265e-06,
+    "l2_factor": 4.0599346034442354e-05
   },
   "input_shape": 73
 }
