@@ -1849,6 +1849,156 @@ class ComparativeAnalyzer:
         plt.savefig(self.results_dir / f"ensemble_noise_comparison_monk{self.problem_number}.png", dpi=300)
         plt.close()
 
+def analyze_ensemble_size(problem_number, max_ensemble_size=15, noise_levels=None):
+    """
+    Запускает анализ зависимости точности от размера ансамбля.
+    
+    Args:
+        problem_number: Номер задачи MONK
+        max_ensemble_size: Максимальный размер ансамбля для исследования
+        noise_levels: Список уровней шума
+    
+    Returns:
+        Результаты анализа
+    """
+    logger.info(f"=== Запуск анализа размера ансамбля для MONK-{problem_number} ===")
+    start_time = time.time()
+    
+    # Загрузка данных
+    X_train, y_train, X_test, y_test = DataLoader.load_monks_data(problem_number)
+    
+    # Разделение на тренировочную и валидационную выборки
+    X_train_subset, X_val, y_train_subset, y_val = train_test_split(
+        X_train, y_train, test_size=0.2, random_state=RANDOM_SEED, stratify=y_train
+    )
+    
+    # Установка базовых гиперпараметров на основе задачи
+    if problem_number == 2:  # Сложная задача
+        base_params = {
+            'n_layers': 3,
+            'units_first': 128,
+            'activation': 'elu',
+            'use_batch_norm': True,
+            'dropout_rate': 0.3,
+            'use_residual': True,
+            'learning_rate': 0.001,
+            'batch_size': 32,
+            'optimizer': 'adam',
+            'use_regularization': True,
+            'l1_factor': 1e-5,
+            'l2_factor': 1e-4,
+        }
+    else:  # Более простые задачи
+        base_params = {
+            'n_layers': 2,
+            'units_first': 64,
+            'activation': 'relu',
+            'use_batch_norm': True,
+            'dropout_rate': 0.2,
+            'use_residual': False,
+            'learning_rate': 0.001,
+            'batch_size': 32,
+            'optimizer': 'adam',
+            'use_regularization': False,
+            'l1_factor': 0,
+            'l2_factor': 0
+        }
+    
+    # Результаты для разных размеров ансамбля
+    results = {
+        'ensemble_sizes': list(range(1, max_ensemble_size + 1)),
+        'problem_number': problem_number,
+        'accuracies': {}
+    }
+    
+    # Уровни шума по умолчанию
+    if noise_levels is None:
+        noise_levels = [0, 0.1, 0.3, 0.5]
+    
+    results['noise_levels'] = noise_levels
+    
+    # Для каждого уровня шума
+    for noise_level in noise_levels:
+        noise_key = f"noise_{int(noise_level*100)}"
+        results['accuracies'][noise_key] = []
+        
+        # Для каждого размера ансамбля
+        for size in range(1, max_ensemble_size + 1):
+            # Создаем и обучаем ансамбль
+            ensemble = EnsembleClassifier(problem_number, base_params=base_params, num_models=size)
+            ensemble.build_ensemble(X_train, y_train, X_val, y_val)
+            
+            # Если нужно добавить шум
+            if noise_level > 0:
+                X_test_noisy = add_noise_to_features(X_test, noise_level, 'gaussian')
+                predictions, _ = ensemble.predict(X_test_noisy)
+            else:
+                predictions, _ = ensemble.predict(X_test)
+                
+            # Вычисляем точность
+            accuracy = accuracy_score(y_test, predictions)
+            
+            # Сохраняем результат
+            results['accuracies'][noise_key].append({
+                'size': size,
+                'accuracy': float(accuracy)
+            })
+            
+            logger.info(f"Ансамбль размера {size}, шум {noise_level*100}%: точность = {accuracy:.4f}")
+    
+    # Визуализируем результаты
+    try:
+        # Для случая без шума
+        plt.figure(figsize=(12, 8))
+        noise_key = "noise_0"
+        sizes = [item['size'] for item in results['accuracies'][noise_key]]
+        accuracies = [item['accuracy'] for item in results['accuracies'][noise_key]]
+        
+        plt.plot(sizes, accuracies, 'o-', linewidth=2)
+        
+        plt.title(f'Зависимость точности от размера ансамбля (MONK-{problem_number})', fontsize=14)
+        plt.xlabel('Размер ансамбля', fontsize=12)
+        plt.ylabel('Точность', fontsize=12)
+        plt.grid(alpha=0.3)
+        plt.xticks(sizes)
+        
+        plt.savefig(RESULTS_DIR / f"ensemble_size_impact_monk{problem_number}.png", dpi=300)
+        plt.close()
+        
+        # Для разных уровней шума
+        plt.figure(figsize=(12, 8))
+        
+        for noise_level in noise_levels:
+            noise_key = f"noise_{int(noise_level*100)}"
+            if noise_key in results['accuracies']:
+                sizes = [item['size'] for item in results['accuracies'][noise_key]]
+                accuracies = [item['accuracy'] for item in results['accuracies'][noise_key]]
+                
+                plt.plot(sizes, accuracies, 'o-', label=f'Шум {int(noise_level*100)}%')
+        
+        plt.title(f'Влияние размера ансамбля на устойчивость к шуму (MONK-{problem_number})', fontsize=14)
+        plt.xlabel('Размер ансамбля', fontsize=12)
+        plt.ylabel('Точность', fontsize=12)
+        plt.grid(alpha=0.3)
+        plt.xticks(sizes)
+        plt.legend()
+        
+        plt.savefig(RESULTS_DIR / f"ensemble_size_noise_impact_monk{problem_number}.png", dpi=300)
+        plt.close()
+    except Exception as e:
+        logger.warning(f"Ошибка при визуализации результатов: {str(e)}")
+    
+    # Сохраняем результаты в JSON
+    try:
+        with open(RESULTS_DIR / f"ensemble_size_analysis_monk{problem_number}.json", 'w') as f:
+            json.dump(results, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Ошибка при сохранении результатов: {str(e)}")
+    
+    elapsed_time = time.time() - start_time
+    logger.info(f"=== Анализ размера ансамбля завершен. Время выполнения: {elapsed_time:.2f} секунд ===")
+    
+    return results
 
 if __name__ == "__main__":
     print("=== Запуск оптимального классификатора для набора данных MONK ===")

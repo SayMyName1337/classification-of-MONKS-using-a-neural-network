@@ -23,7 +23,7 @@ from PyQt5.QtGui import QFont, QIcon, QDesktopServices, QPixmap, QPalette, QColo
 # Импортируем вашу существующую логику классификации
 # ВАЖНО: В зависимости от того, как организован ваш код, может потребоваться адаптация импортов
 from Monks_v2 import (DataLoader, HyperOptimizer, EnsembleClassifier, run_optimal_classifier, 
-                  ComparativeAnalyzer)
+                  ComparativeAnalyzer, analyze_ensemble_size)
 
 # Настройка логирования
 logging.basicConfig(
@@ -121,15 +121,15 @@ class ClassificationWorker(QThread):
                 self.update_log.emit(f"Запуск анализа размера ансамбля для MONK-{self.params['problem_number']}...")
                 
                 # Запускаем анализ размера ансамбля
-                # results = analyze_ensemble_size(
-                #     self.params['problem_number'],
-                #     max_ensemble_size=self.params['max_ensemble_size'],
-                #     noise_levels=np.arange(
-                #         self.params['min_noise'], 
-                #         self.params['max_noise'] + self.params['noise_step']/2, 
-                #         self.params['noise_step']
-                #     ).tolist()
-                # )
+                results = analyze_ensemble_size(
+                    self.params['problem_number'],
+                    max_ensemble_size=self.params['max_ensemble_size'],
+                    noise_levels=np.arange(
+                        self.params['min_noise'], 
+                        self.params['max_noise'] + self.params['noise_step']/2, 
+                        self.params['noise_step']
+                    ).tolist()
+                )
                 
                 # Эмулируем завершение для отображения прогресса
                 self.update_progress.emit(95)
