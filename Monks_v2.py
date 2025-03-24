@@ -143,6 +143,18 @@ class DataLoader:
             df['a5_eq_1'] = (df['a5'] == 1).astype(float)
             df['rule_1_satisfied'] = ((df['a1'] == df['a2']) | (df['a5'] == 1)).astype(float)
             
+            # Используем логические операции с булевыми значениями (не float)
+            a1_eq_a2_bool = (df['a1'] == df['a2'])
+            a5_eq_1_bool = (df['a5'] == 1)
+            
+            # Добавляем компоненты правила - с правильным приведением типов
+            df['rule_component_1'] = (a1_eq_a2_bool & (~a5_eq_1_bool)).astype(float)
+            df['rule_component_2'] = ((~a1_eq_a2_bool) & a5_eq_1_bool).astype(float)
+            df['rule_component_3'] = (a1_eq_a2_bool & a5_eq_1_bool).astype(float)
+            
+            # Добавляем усиленный признак
+            df['rule_1_amplified'] = df['rule_1_satisfied'] ** 2
+            
             # Дополнительные полезные признаки
             for i in range(1, 7):
                 for j in range(i + 1, 7):
@@ -154,8 +166,8 @@ class DataLoader:
             
             # Подсчет атрибутов со значением 1
             df['count_1s'] = ((df['a1'] == 1) + (df['a2'] == 1) + 
-                             (df['a3'] == 1) + (df['a4'] == 1) + 
-                             (df['a5'] == 1) + (df['a6'] == 1)).astype(float)
+                            (df['a3'] == 1) + (df['a4'] == 1) + 
+                            (df['a5'] == 1) + (df['a6'] == 1)).astype(float)
             
             # Ключевой признак - флаг "ровно 2"
             df['exactly_two_1s'] = (df['count_1s'] == 2).astype(float)
@@ -188,6 +200,18 @@ class DataLoader:
             df['a5_neq_4_and_a2_neq_3'] = ((df['a5'] != 4) & (df['a2'] != 3)).astype(float)
             df['rule_3_satisfied'] = ((df['a5'] == 3) & (df['a4'] == 1)) | ((df['a5'] != 4) & (df['a2'] != 3))
             df['rule_3_satisfied'] = df['rule_3_satisfied'].astype(float)
+            
+            # Создаем булевы версии для безопасной логической операции NOT
+            rule_part1_bool = (df['a5'] == 3) & (df['a4'] == 1)
+            rule_part2_bool = (df['a5'] != 4) & (df['a2'] != 3)
+            
+            # Добавляем детализированные признаки
+            df['rule_part1_only'] = (rule_part1_bool & (~rule_part2_bool)).astype(float)
+            df['rule_part2_only'] = ((~rule_part1_bool) & rule_part2_bool).astype(float)
+            df['rule_both_parts'] = (rule_part1_bool & rule_part2_bool).astype(float)
+            
+            # Квадрат признака правила для его усиления
+            df['rule_3_amplified'] = df['rule_3_satisfied'] ** 2
             
             # Добавляем комбинации для первой части правила
             df['a5_eq_3'] = (df['a5'] == 3).astype(float)
@@ -709,7 +733,7 @@ class EnsembleClassifier:
     
     def predict(self, X):
         """
-        Выполняет прогнозирование ансамблем моделей с взвешенным голосованием.
+        Выполняет прогнозирование ансамблем моделей с адаптивной стратегией голосования в зависимости от задачи.
         
         Args:
             X: Данные для прогнозирования
@@ -724,10 +748,49 @@ class EnsembleClassifier:
         # Проверяем и приводим данные к правильному типу
         X = np.asarray(X, dtype=np.float32)
         
+        # Различные стратегии для разных задач MONK
+        if hasattr(self, 'problem_number') and self.problem_number in [1, 3]:
+            logger.info(f"Используем стратегию выбора по уверенности для MONK-{self.problem_number}")
+            
+            # Получаем предсказания от каждой модели
+            all_predictions = []
+            for model in self.models:
+                try:
+                    pred = model.predict(X, verbose=0)
+                    # Приводим к одномерному массиву и к типу float
+                    pred_array = np.array(pred, dtype=np.float32).flatten()
+                    all_predictions.append(pred_array)
+                except Exception as e:
+                    logger.warning(f"Ошибка при получении предсказания от модели: {str(e)}")
+                    # В случае ошибки добавляем массив заполненный 0.5 (неуверенное предсказание)
+                    all_predictions.append(np.full(X.shape[0], 0.5, dtype=np.float32))
+            
+            # Преобразуем в numpy массив
+            all_predictions = np.array(all_predictions)  # [n_models, n_samples]
+            
+            # Проверяем корректность размерности
+            if len(all_predictions.shape) != 2 or all_predictions.shape[0] != len(self.models):
+                logger.warning("Некорректная форма массива предсказаний. Используем стандартное голосование.")
+                # Переходим к стандартному взвешенному голосованию
+            else:
+                # Вычисляем уверенность каждой модели (расстояние от 0.5)
+                confidences = np.abs(all_predictions - 0.5)
+                
+                # Для каждого образца используем предсказание от наиболее уверенной модели
+                ensemble_predictions = np.zeros(X.shape[0], dtype=np.float32)
+                for i in range(X.shape[0]):
+                    model_idx = np.argmax(confidences[:, i])
+                    ensemble_predictions[i] = all_predictions[model_idx, i]
+                
+                # Преобразуем в бинарные метки
+                binary_predictions = (ensemble_predictions > 0.5).astype(int)
+                return binary_predictions, ensemble_predictions.reshape(-1, 1)
+        
+        # Стандартное взвешенное голосование для MONK-2 или других случаев
         # Проверяем наличие весов для взвешенного голосования
         if hasattr(self, 'val_accuracies') and len(self.val_accuracies) == len(self.models):
             # Используем валидационные точности как веса
-            weights = np.array(self.val_accuracies)
+            weights = np.array(self.val_accuracies, dtype=np.float32)
             
             # Дополнительно усиливаем влияние лучших моделей
             weights = weights ** 2  # Возведение в квадрат увеличивает разницу между весами
@@ -738,18 +801,38 @@ class EnsembleClassifier:
             logger.info(f"Используем взвешенное голосование, веса: {weights}")
         else:
             # Если весов нет, используем равные веса
-            weights = np.ones(len(self.models)) / len(self.models)
+            weights = np.ones(len(self.models), dtype=np.float32) / len(self.models)
             logger.info("Используем равные веса для всех моделей")
         
         # Получаем предсказания от каждой модели с учетом весов
         predictions = []
         for i, model in enumerate(self.models):
-            pred = model.predict(X, verbose=0)
-            # Умножаем на вес модели
-            predictions.append(pred * weights[i])
+            try:
+                pred = model.predict(X, verbose=0)
+                # Умножаем на вес модели и явно приводим к нужному типу
+                pred_weighted = np.array(pred, dtype=np.float32) * weights[i]
+                predictions.append(pred_weighted)
+            except Exception as e:
+                logger.warning(f"Ошибка при получении предсказания от модели {i}: {str(e)}")
+                # Пропускаем проблемную модель
         
-        # Суммируем взвешенные предсказания
-        ensemble_predictions = np.sum(predictions, axis=0)
+        if not predictions:
+            logger.error("Не удалось получить предсказания ни от одной модели")
+            # Возвращаем нулевые предсказания
+            return np.zeros(X.shape[0], dtype=int), np.full((X.shape[0], 1), 0.5, dtype=np.float32)
+        
+        # Суммируем взвешенные предсказания с проверкой совместимости формы
+        try:
+            ensemble_predictions = np.zeros_like(predictions[0])
+            for pred in predictions:
+                if pred.shape == ensemble_predictions.shape:
+                    ensemble_predictions += pred
+                else:
+                    logger.warning(f"Пропуск предсказания из-за несовместимой формы: {pred.shape} vs {ensemble_predictions.shape}")
+        except Exception as e:
+            logger.error(f"Ошибка при объединении предсказаний: {str(e)}")
+            # Возвращаем нулевые предсказания
+            return np.zeros(X.shape[0], dtype=int), np.full((X.shape[0], 1), 0.5, dtype=np.float32)
         
         # Преобразуем в бинарные метки
         binary_predictions = (ensemble_predictions > 0.5).astype(int).flatten()
@@ -1076,15 +1159,15 @@ def run_optimal_classifier(problem_number, run_hyperopt=True, n_trials=50, ensem
                     # Относительно простое правило, подходит среднего размера сеть с ELU
                     default_params = {
                         'n_layers': 2,
-                        'units_first': 64,
-                        'activation': 'elu',
+                        'units_first': 32,
+                        'activation': 'tanh',  # Different activation
                         'use_batch_norm': True,
-                        'dropout_rate': 0.2,  # Меньше дропаут для более простой задачи
+                        'dropout_rate': 0.1,  # Lower dropout
                         'use_residual': False,
-                        'learning_rate': 0.001,
-                        'batch_size': 32,
+                        'learning_rate': 0.003,
+                        'batch_size': 16,
                         'optimizer': 'adam',
-                        'use_regularization': False,
+                        'use_regularization': False,  # No regularization for simpler problem
                         'l1_factor': 0,
                         'l2_factor': 0
                     }
@@ -1109,18 +1192,18 @@ def run_optimal_classifier(problem_number, run_hyperopt=True, n_trials=50, ensem
                     # MONK-3: (a5 = 3 AND a4 = 1) OR (a5 ≠ 4 AND a2 ≠ 3)
                     # Комбинация AND и OR с отрицаниями
                     default_params = {
-                        'n_layers': 3,
-                        'units_first': 96,
+                        'n_layers': 2,
+                        'units_first': 48,
                         'activation': 'relu',
                         'use_batch_norm': True,
-                        'dropout_rate': 0.25,
+                        'dropout_rate': 0.15,
                         'use_residual': False,
-                        'learning_rate': 0.001,
-                        'batch_size': 32,
+                        'learning_rate': 0.002,
+                        'batch_size': 24,
                         'optimizer': 'adam',
-                        'use_regularization': True,
+                        'use_regularization': False,
                         'l1_factor': 0,
-                        'l2_factor': 1e-5,
+                        'l2_factor': 0
                     }
 
                 # Присваиваем параметры по умолчанию, если не удалось загрузить
