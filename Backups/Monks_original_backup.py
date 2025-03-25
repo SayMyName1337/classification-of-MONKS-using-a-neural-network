@@ -748,153 +748,97 @@ class EnsembleClassifier:
         # Проверяем и приводим данные к правильному типу
         X = np.asarray(X, dtype=np.float32)
         
-        # Получаем предсказания от всех моделей
-        all_predictions = []
-        for model in self.models:
+        # Различные стратегии для разных задач MONK
+        if hasattr(self, 'problem_number') and self.problem_number in [1, 3]:
+            logger.info(f"Используем стратегию выбора по уверенности для MONK-{self.problem_number}")
+            
+            # Получаем предсказания от каждой модели
+            all_predictions = []
+            for model in self.models:
+                try:
+                    pred = model.predict(X, verbose=0)
+                    # Приводим к одномерному массиву и к типу float
+                    pred_array = np.array(pred, dtype=np.float32).flatten()
+                    all_predictions.append(pred_array)
+                except Exception as e:
+                    logger.warning(f"Ошибка при получении предсказания от модели: {str(e)}")
+                    # В случае ошибки добавляем массив заполненный 0.5 (неуверенное предсказание)
+                    all_predictions.append(np.full(X.shape[0], 0.5, dtype=np.float32))
+            
+            # Преобразуем в numpy массив
+            all_predictions = np.array(all_predictions)  # [n_models, n_samples]
+            
+            # Проверяем корректность размерности
+            if len(all_predictions.shape) != 2 or all_predictions.shape[0] != len(self.models):
+                logger.warning("Некорректная форма массива предсказаний. Используем стандартное голосование.")
+                # Переходим к стандартному взвешенному голосованию
+            else:
+                # Вычисляем уверенность каждой модели (расстояние от 0.5)
+                confidences = np.abs(all_predictions - 0.5)
+                
+                # Для каждого образца используем предсказание от наиболее уверенной модели
+                ensemble_predictions = np.zeros(X.shape[0], dtype=np.float32)
+                for i in range(X.shape[0]):
+                    model_idx = np.argmax(confidences[:, i])
+                    ensemble_predictions[i] = all_predictions[model_idx, i]
+                
+                # Преобразуем в бинарные метки
+                binary_predictions = (ensemble_predictions > 0.5).astype(int)
+                return binary_predictions, ensemble_predictions.reshape(-1, 1)
+        
+        # Стандартное взвешенное голосование для MONK-2 или других случаев
+        # Проверяем наличие весов для взвешенного голосования
+        if hasattr(self, 'val_accuracies') and len(self.val_accuracies) == len(self.models):
+            # Используем валидационные точности как веса
+            weights = np.array(self.val_accuracies, dtype=np.float32)
+            
+            # Дополнительно усиливаем влияние лучших моделей
+            weights = weights ** 2  # Возведение в квадрат увеличивает разницу между весами
+            
+            # Нормализуем веса, чтобы они суммировались в 1
+            weights = weights / np.sum(weights)
+            
+            logger.info(f"Используем взвешенное голосование, веса: {weights}")
+        else:
+            # Если весов нет, используем равные веса
+            weights = np.ones(len(self.models), dtype=np.float32) / len(self.models)
+            logger.info("Используем равные веса для всех моделей")
+        
+        # Получаем предсказания от каждой модели с учетом весов
+        predictions = []
+        for i, model in enumerate(self.models):
             try:
                 pred = model.predict(X, verbose=0)
-                all_predictions.append(np.array(pred, dtype=np.float32).flatten())
+                # Умножаем на вес модели и явно приводим к нужному типу
+                pred_weighted = np.array(pred, dtype=np.float32) * weights[i]
+                predictions.append(pred_weighted)
             except Exception as e:
-                logger.warning(f"Ошибка при получении предсказания от модели: {str(e)}")
-                # В случае ошибки добавляем массив заполненный 0.5 (неуверенное предсказание)
-                all_predictions.append(np.full(X.shape[0], 0.5, dtype=np.float32))
+                logger.warning(f"Ошибка при получении предсказания от модели {i}: {str(e)}")
+                # Пропускаем проблемную модель
         
-        # Преобразуем в numpy массив
-        all_predictions = np.array(all_predictions)  # [n_models, n_samples]
+        if not predictions:
+            logger.error("Не удалось получить предсказания ни от одной модели")
+            # Возвращаем нулевые предсказания
+            return np.zeros(X.shape[0], dtype=int), np.full((X.shape[0], 1), 0.5, dtype=np.float32)
         
-        # Вычисляем уверенность каждой модели для каждого образца как расстояние от 0.5
-        confidences = np.abs(all_predictions - 0.5)
-        
-        # Нормализуем уверенности в веса (по каждому образцу)
-        # Обработка случая, когда все уверенности для образца равны 0
-        sum_conf = np.sum(confidences, axis=0)
-        sum_conf = np.where(sum_conf == 0, 1.0, sum_conf)  # Избегаем деления на ноль
-        
-        weights = confidences / sum_conf
-        
-        # Применяем веса к предсказаниям для каждого образца
-        ensemble_predictions = np.zeros(X.shape[0], dtype=np.float32)
-        for i in range(X.shape[0]):
-            ensemble_predictions[i] = np.sum(all_predictions[:, i] * weights[:, i])
+        # Суммируем взвешенные предсказания с проверкой совместимости формы
+        try:
+            ensemble_predictions = np.zeros_like(predictions[0])
+            for pred in predictions:
+                if pred.shape == ensemble_predictions.shape:
+                    ensemble_predictions += pred
+                else:
+                    logger.warning(f"Пропуск предсказания из-за несовместимой формы: {pred.shape} vs {ensemble_predictions.shape}")
+        except Exception as e:
+            logger.error(f"Ошибка при объединении предсказаний: {str(e)}")
+            # Возвращаем нулевые предсказания
+            return np.zeros(X.shape[0], dtype=int), np.full((X.shape[0], 1), 0.5, dtype=np.float32)
         
         # Преобразуем в бинарные метки
-        binary_predictions = (ensemble_predictions > 0.5).astype(int)
+        binary_predictions = (ensemble_predictions > 0.5).astype(int).flatten()
         
-        return binary_predictions, ensemble_predictions.reshape(-1, 1)
+        return binary_predictions, ensemble_predictions
     
-    def build_snapshot_ensemble(self, X_train, y_train, X_val, y_val, n_snapshots=5, max_epochs=200):
-        """
-        Строит ансамбль на основе снимков одной модели в разных точках обучения.
-        
-        Args:
-            X_train: Обучающие признаки
-            y_train: Обучающие метки
-            X_val: Валидационные признаки
-            y_val: Валидационные метки
-            n_snapshots: Количество снимков (моделей в ансамбле)
-            max_epochs: Максимальное количество эпох обучения
-        """
-        logger.info(f"Построение Snapshot Ensemble из {n_snapshots} моделей")
-        self.input_shape = X_train.shape[1]
-        
-        # Проверяем типы данных
-        X_train = np.asarray(X_train, dtype=np.float32)
-        y_train = np.asarray(y_train, dtype=np.float32)
-        X_val = np.asarray(X_val, dtype=np.float32)
-        y_val = np.asarray(y_val, dtype=np.float32)
-        
-        # Создаем директорию для моделей ансамбля
-        ensemble_dir = MODELS_DIR / f"monk{self.problem_number}_ensemble"
-        ensemble_dir.mkdir(exist_ok=True)
-        
-        # Настраиваем базовые слои и параметры
-        layer_units = [int(self.base_params.get('units_first', 64)), 
-                    int(self.base_params.get('units_first', 64) // 2), 
-                    int(self.base_params.get('units_first', 64) // 4)]
-        
-        # Создаем базовую модель
-        model = self._create_model_with_layers(self.base_params, layer_units)
-        
-        # Компилируем модель
-        model.compile(
-            optimizer=Adam(learning_rate=float(self.base_params.get('learning_rate', 0.001))),
-            loss='binary_crossentropy',
-            metrics=['accuracy']
-        )
-        
-        # Цикл обучения с сохранением снимков
-        self.models = []
-        self.val_accuracies = []
-        
-        # Расчет эпох для снимков
-        epochs_per_snapshot = max_epochs // n_snapshots
-        snapshot_epochs = [(i+1) * epochs_per_snapshot for i in range(n_snapshots)]
-        
-        # Колбэки для обучения
-        callbacks = [
-            EarlyStopping(
-                monitor='val_loss',
-                patience=20,
-                restore_best_weights=True
-            ),
-            ReduceLROnPlateau(
-                monitor='val_loss',
-                factor=0.5,
-                patience=5,
-                min_lr=1e-6
-            )
-        ]
-        
-        # Обучаем модель на весь период
-        history = model.fit(
-            X_train, y_train,
-            validation_data=(X_val, y_val),
-            epochs=snapshot_epochs[0],  # Обучаем до первого снимка
-            batch_size=int(self.base_params.get('batch_size', 32)),
-            callbacks=callbacks,
-            verbose=0
-        )
-        
-        # Сохраняем первый снимок
-        _, val_acc = model.evaluate(X_val, y_val, verbose=0)
-        model_path = ensemble_dir / f"model_1.h5"
-        model.save(model_path)
-        self.models.append(model)
-        self.val_accuracies.append(float(val_acc))
-        
-        logger.info(f"Snapshot 1/{n_snapshots}, эпоха {snapshot_epochs[0]}, val_acc: {val_acc:.4f}")
-        
-        # Продолжаем обучение и делаем остальные снимки
-        for i in range(1, n_snapshots):
-            # Создаем новую модель с другой архитектурой
-            new_model = self._create_model_with_layers(self.base_params, layer_units)
-            new_model.compile(
-                optimizer=Adam(learning_rate=float(self.base_params.get('learning_rate', 0.001)) * (0.8 ** i)),  # Уменьшаем LR
-                loss='binary_crossentropy',
-                metrics=['accuracy']
-            )
-            
-            # Обучаем модель
-            history = new_model.fit(
-                X_train, y_train,
-                validation_data=(X_val, y_val),
-                epochs=epochs_per_snapshot,
-                batch_size=int(self.base_params.get('batch_size', 32)),
-                callbacks=callbacks,
-                verbose=0
-            )
-            
-            # Оцениваем и сохраняем
-            _, val_acc = new_model.evaluate(X_val, y_val, verbose=0)
-            model_path = ensemble_dir / f"model_{i+1}.h5"
-            new_model.save(model_path)
-            self.models.append(new_model)
-            self.val_accuracies.append(float(val_acc))
-            
-            logger.info(f"Snapshot {i+1}/{n_snapshots}, эпоха {(i+1)*epochs_per_snapshot}, val_acc: {val_acc:.4f}")
-        
-        logger.info(f"Snapshot Ensemble построен, {len(self.models)} моделей")
-
     def evaluate(self, X, y_true):
         """
         Оценивает производительность ансамбля.
@@ -1016,7 +960,7 @@ class EnsembleClassifier:
     
     def _create_model_with_layers(self, params, layer_units):
         """
-        Создает модель с указанной конфигурацией слоев и большим разнообразием архитектур.
+        Создает модель с указанной конфигурацией слоев.
         
         Args:
             params: Словарь гиперпараметров
@@ -1030,91 +974,33 @@ class EnsembleClassifier:
         if params.get('use_regularization', False):
             regularizer = l1_l2(l1=float(params.get('l1_factor', 0)), l2=float(params.get('l2_factor', 0)))
         
-        # Выбираем тип архитектуры случайным образом для разнообразия
-        architecture_type = np.random.choice(['standard', 'wide_narrow', 'varied_activation'])
-        
         # Создаем последовательную модель
         model = Sequential()
         
         # Входной слой
         model.add(Input(shape=(self.input_shape,)))
         
-        if architecture_type == 'standard':
-            # Стандартная архитектура с прямыми соединениями
-            for i, units in enumerate(layer_units):
-                model.add(Dense(
-                    int(units),
-                    kernel_regularizer=regularizer
-                ))
-                
-                # Активация
-                if params.get('activation') == 'leaky_relu':
-                    model.add(LeakyReLU(alpha=0.1))
-                else:
-                    model.add(Activation(params.get('activation', 'relu')))
-                
-                # Нормализация и регуляризация
-                if params.get('use_batch_norm', True):
-                    model.add(BatchNormalization())
-                    
-                dropout_rate = float(params.get('dropout_rate', 0.3))
-                if dropout_rate > 0:
-                    model.add(Dropout(dropout_rate))
-        
-        elif architecture_type == 'wide_narrow':
-            # Модель с чередованием широких и узких слоев
-            for i, units in enumerate(layer_units):
-                # Чередуем увеличение и уменьшение размеров
-                if i % 2 == 0:
-                    actual_units = int(units * 1.5)  # Широкий слой
-                else:
-                    actual_units = int(units * 0.75)  # Узкий слой
-                    
-                model.add(Dense(
-                    max(16, actual_units),  # Минимум 16 нейронов
-                    kernel_regularizer=regularizer
-                ))
-                
-                # Активация - используем исходную, чтобы избежать проблем
-                if params.get('activation') == 'leaky_relu':
-                    model.add(LeakyReLU(alpha=0.1))
-                else:
-                    model.add(Activation(params.get('activation', 'relu')))
-                
-                # Нормализация и регуляризация
-                if params.get('use_batch_norm', True):
-                    model.add(BatchNormalization())
-                    
-                dropout_rate = float(params.get('dropout_rate', 0.3))
-                if dropout_rate > 0:
-                    # Разные уровни dropout для разных слоев
-                    actual_dropout = dropout_rate * (0.8 + 0.4 * (i % 2))
-                    model.add(Dropout(min(0.5, actual_dropout)))  # Ограничиваем максимальный dropout
-        
-        elif architecture_type == 'varied_activation':
-            # Модель с разными активациями для каждого слоя
-            activations = ['relu', 'elu', 'tanh', 'selu']
+        # Каждый скрытый слой
+        for i, units in enumerate(layer_units):
+            # Добавляем Dense слой
+            model.add(Dense(
+                int(units),  # Убедимся, что это int
+                kernel_regularizer=regularizer
+            ))
             
-            for i, units in enumerate(layer_units):
-                model.add(Dense(
-                    int(units),
-                    kernel_regularizer=regularizer
-                ))
+            # Активация
+            if params['activation'] == 'leaky_relu':
+                model.add(LeakyReLU(alpha=0.1))
+            else:
+                model.add(Activation(params['activation']))
+            
+            # Нормализация и регуляризация
+            if params.get('use_batch_norm', True):
+                model.add(BatchNormalization())
                 
-                # Выбираем разные активации для разных слоев
-                activation = activations[i % len(activations)]
-                if activation == 'leaky_relu':
-                    model.add(LeakyReLU(alpha=0.1))
-                else:
-                    model.add(Activation(activation))
-                
-                # Нормализация и регуляризация
-                if params.get('use_batch_norm', True) and i < len(layer_units) - 1:  # Избегаем BN перед выходным слоем
-                    model.add(BatchNormalization())
-                    
-                dropout_rate = float(params.get('dropout_rate', 0.3))
-                if dropout_rate > 0 and i < len(layer_units) - 1:  # Избегаем Dropout перед выходным слоем
-                    model.add(Dropout(dropout_rate))
+            dropout_rate = float(params.get('dropout_rate', 0.3))
+            if dropout_rate > 0:
+                model.add(Dropout(dropout_rate))
         
         # Выходной слой
         model.add(Dense(1, activation='sigmoid'))
@@ -1213,8 +1099,7 @@ class EnsembleClassifier:
 
 def run_optimal_classifier(problem_number, run_hyperopt=True, n_trials=50, ensemble_size=5, 
                           analyze_noise=True, run_comparative=True,
-                          min_noise=0.0, max_noise=0.5, noise_step=0.1,
-                          ensemble_type='standard'):
+                          min_noise=0.0, max_noise=0.5, noise_step=0.1):
     """
     Запускает полный процесс оптимизации, обучения и анализа классификатора.
     
@@ -1345,18 +1230,6 @@ def run_optimal_classifier(problem_number, run_hyperopt=True, n_trials=50, ensem
     # Построение и обучение ансамбля моделей
     logger.info(f"Создание ансамбля из {ensemble_size} моделей")
     ensemble = EnsembleClassifier(problem_number, base_params=best_params, num_models=ensemble_size)
-
-    # Выбор метода построения ансамбля в зависимости от типа
-    if ensemble_type == 'snapshot':
-        ensemble.build_snapshot_ensemble(X_train, y_train, X_val, y_val, n_snapshots=ensemble_size)
-    elif ensemble_type == 'stacked':
-        # Используем существующий метод build_stacked_ensemble
-        ensemble.build_stacked_ensemble(X_train, y_train, X_val, y_val, 
-                                    initial_ensemble_size=min(ensemble_size * 2, 20),
-                                    final_ensemble_size=ensemble_size)
-    else:  # 'standard'
-        # Для небольших ансамблей используем обычный подход
-        ensemble.build_ensemble(X_train, y_train, X_val, y_val)
 
     # Если размер ансамбля больше 3, используем стекинговый подход
     if ensemble_size > 3:
