@@ -1360,7 +1360,7 @@ def run_optimal_classifier(problem_number, run_hyperopt=True, n_trials=50, ensem
 
     # Если размер ансамбля больше 3, используем стекинговый подход
     if ensemble_size > 3:
-        initial_size = min(ensemble_size * 2, 40)  # Обучаем в 2 раза больше моделей для отбора
+        initial_size = min(ensemble_size * 2, 100)  # Обучаем в 2 раза больше моделей для отбора
         ensemble.build_stacked_ensemble(X_train, y_train, X_val, y_val, 
                                     initial_ensemble_size=initial_size, 
                                     final_ensemble_size=ensemble_size)
