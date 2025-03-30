@@ -373,7 +373,10 @@ class MonksGUI(QMainWindow):
             "Сравнительный анализ (Uniform)",
             "Устойчивость ансамбля к типам шума",
             "Матрица ошибок",
-            "ROC кривая"
+            "ROC кривая",
+            "Устойчивость к шуму",
+            "Важность параметров",
+            "История оптимизации"
         ])
         self.graph_combo.currentIndexChanged.connect(self.update_graph)
         graph_selection_layout.addWidget(self.graph_combo)
@@ -680,6 +683,13 @@ class MonksGUI(QMainWindow):
             self.load_and_display_confusion_matrix(problem_number)
         elif index == 7:  # ROC кривая
             self.load_and_display_roc_curve(problem_number)
+        elif index == 8:  # Устойчивость к шуму (при анализе только шума, без сравнения)
+            self.load_and_display_noise_resistance(problem_number)
+        elif index == 9:  # Важность параметров
+            self.load_and_display_param_importance(problem_number)
+        elif index == 10:  # История оптимизации
+            self.load_and_display_optimization_history(problem_number)
+
         
         # Обновляем холст
         self.canvas.fig.tight_layout()
@@ -983,6 +993,72 @@ class MonksGUI(QMainWindow):
             
             except Exception as e:
                 QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить результаты:\n{str(e)}")
+    
+    def load_and_display_noise_resistance(self, problem_number):
+        """Загрузка и отображение графика устойчивости к шуму"""
+        try:
+            # Путь к сохраненному изображению
+            image_path = f"./results/noise_resistance_monk{problem_number}.png"
+            
+            if os.path.exists(image_path):
+                # Загружаем и отображаем изображение
+                img = plt.imread(image_path)
+                self.canvas.axes.imshow(img)
+                self.canvas.axes.axis('off')  # Отключаем оси
+            else:
+                # Если изображение не найдено, отображаем сообщение
+                self.canvas.axes.text(0.5, 0.5, f"График не найден: {image_path}", 
+                                ha='center', va='center', fontsize=12)
+                self.canvas.axes.axis('off')
+        except Exception as e:
+            # В случае ошибки отображаем сообщение
+            self.canvas.axes.text(0.5, 0.5, f"Ошибка при загрузке графика: {str(e)}", 
+                            ha='center', va='center', fontsize=12)
+            self.canvas.axes.axis('off')
+
+    def load_and_display_param_importance(self, problem_number):
+        """Загрузка и отображение графика важности параметров"""
+        try:
+            # Путь к сохраненному изображению
+            image_path = f"./results/param_importance_monk{problem_number}.png"
+            
+            if os.path.exists(image_path):
+                # Загружаем и отображаем изображение
+                img = plt.imread(image_path)
+                self.canvas.axes.imshow(img)
+                self.canvas.axes.axis('off')  # Отключаем оси
+            else:
+                # Если изображение не найдено, отображаем сообщение
+                self.canvas.axes.text(0.5, 0.5, f"График не найден: {image_path}", 
+                                ha='center', va='center', fontsize=12)
+                self.canvas.axes.axis('off')
+        except Exception as e:
+            # В случае ошибки отображаем сообщение
+            self.canvas.axes.text(0.5, 0.5, f"Ошибка при загрузке графика: {str(e)}", 
+                            ha='center', va='center', fontsize=12)
+            self.canvas.axes.axis('off')
+
+    def load_and_display_optimization_history(self, problem_number):
+        """Загрузка и отображение графика истории оптимизации"""
+        try:
+            # Путь к сохраненному изображению
+            image_path = f"./results/optimization_history_monk{problem_number}.png"
+            
+            if os.path.exists(image_path):
+                # Загружаем и отображаем изображение
+                img = plt.imread(image_path)
+                self.canvas.axes.imshow(img)
+                self.canvas.axes.axis('off')  # Отключаем оси
+            else:
+                # Если изображение не найдено, отображаем сообщение
+                self.canvas.axes.text(0.5, 0.5, f"График не найден: {image_path}", 
+                                ha='center', va='center', fontsize=12)
+                self.canvas.axes.axis('off')
+        except Exception as e:
+            # В случае ошибки отображаем сообщение
+            self.canvas.axes.text(0.5, 0.5, f"Ошибка при загрузке графика: {str(e)}", 
+                            ha='center', va='center', fontsize=12)
+            self.canvas.axes.axis('off')
 
 
 def main():
