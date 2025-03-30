@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, QVB
                             QPushButton, QGroupBox, QCheckBox, QSpinBox, QDoubleSpinBox, 
                             QRadioButton, QButtonGroup, QProgressBar, QMessageBox, 
                             QFileDialog, QTableWidget, QTableWidgetItem, QTextEdit, 
-                            QSplitter, QSizePolicy, QFrame, QScrollArea)
+                            QSplitter, QSizePolicy, QFrame, QScrollArea, QHeaderView)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize
 from PyQt5.QtGui import QFont, QIcon, QPixmap, QColor, QPalette
 
@@ -428,6 +428,31 @@ class MonksGUI(QMainWindow):
         self.results_table.horizontalHeader().setStretchLastSection(True)
         self.results_table.setEditTriggers(QTableWidget.NoEditTriggers)  # Запрет редактирования
         
+        # Настройка сортировки и удобства использования
+        self.results_table.setSortingEnabled(True)  # Включаем сортировку
+        self.results_table.horizontalHeader().setSectionsClickable(True)  # Разрешаем клики по заголовкам
+        self.results_table.setSelectionBehavior(QTableWidget.SelectRows)  # Выделение строками
+        
+        # Автоматическая подгонка столбцов и другие улучшения
+        self.results_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)  # Растягиваем по ширине
+        self.results_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)  # Первый столбец по содержимому
+        
+        # Всплывающие подсказки для заголовков
+        header_tooltips = [
+            "Название алгоритма классификации",
+            "Доля правильно классифицированных примеров (Accuracy)",
+            "Precision для класса 0 - доля правильно предсказанных отрицательных примеров среди всех предсказанных как отрицательные",
+            "Recall для класса 0 - доля правильно предсказанных отрицательных примеров среди всех отрицательных примеров",
+            "Precision для класса 1 - доля правильно предсказанных положительных примеров среди всех предсказанных как положительные",
+            "Recall для класса 1 - доля правильно предсказанных положительных примеров среди всех положительных примеров",
+            "F1-Score - гармоническое среднее между precision и recall для положительного класса"
+        ]
+        
+        for i, tooltip in enumerate(header_tooltips):
+            item = self.results_table.horizontalHeaderItem(i)
+            if item:
+                item.setToolTip(tooltip)
+        
         layout.addWidget(self.results_table)
         
         # Кнопки для сохранения результатов
@@ -805,7 +830,7 @@ class MonksGUI(QMainWindow):
             QMessageBox.information(self, "Сохранено", f"График успешно сохранен в файл:\n{file_name}")
     
     def update_results_table(self):
-        """Обновление таблицы результатов классификации"""
+        """Обновление таблицы результатов классификации с дополнительными улучшениями"""
         if self.results is None:
             return
         
@@ -815,6 +840,16 @@ class MonksGUI(QMainWindow):
         problem_number = self.results['problem_number']
         
         try:
+            # Структуры для хранения значений метрик - понадобятся для выделения лучших
+            metrics_values = {
+                'accuracy': [],
+                'precision_0': [],
+                'recall_0': [],
+                'precision_1': [],
+                'recall_1': [],
+                'f1_score': []
+            }
+            
             # Ищем результаты классификации
             if 'comparative_results' in self.results:
                 # Если проводился сравнительный анализ
@@ -861,7 +896,9 @@ class MonksGUI(QMainWindow):
                 # Заполняем таблицу данными для каждой модели
                 for i, model_name in enumerate(model_names):
                     # Устанавливаем имя модели
-                    self.results_table.setItem(i, 0, QTableWidgetItem(model_name))
+                    model_item = QTableWidgetItem(model_name)
+                    model_item.setToolTip(f"Алгоритм классификации: {model_name}")
+                    self.results_table.setItem(i, 0, model_item)
                     
                     # Получаем результаты для модели при уровне шума 0
                     model_results = comparative_results['accuracies'][noise_type][model_name][0]
@@ -869,7 +906,10 @@ class MonksGUI(QMainWindow):
                     # Устанавливаем точность
                     accuracy = model_results.get('mean_accuracy', 0.0)
                     accuracy_item = QTableWidgetItem(f"{accuracy:.4f}")
+                    accuracy_item.setToolTip("Доля правильно классифицированных примеров")
+                    accuracy_item.setData(Qt.UserRole, float(accuracy))  # Для сортировки
                     self.results_table.setItem(i, 1, accuracy_item)
+                    metrics_values['accuracy'].append(float(accuracy))
                     
                     # Рассчитываем метрики на основе матрицы ошибок
                     if model_name in confusion_matrices:
@@ -878,7 +918,7 @@ class MonksGUI(QMainWindow):
                         # Расчет precision и recall для класса 0
                         tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
                         
-                        # Для класса 0
+                        # Для класса 0 (исправленные формулы)
                         precision_0 = tn / (tn + fp) if (tn + fp) > 0 else 0
                         recall_0 = tn / (tn + fn) if (tn + fn) > 0 else 0
                         
@@ -889,21 +929,52 @@ class MonksGUI(QMainWindow):
                         # F1-score
                         f1_score = 2 * (precision_1 * recall_1) / (precision_1 + recall_1) if (precision_1 + recall_1) > 0 else 0
                         
-                        # Устанавливаем метрики в таблицу
-                        self.results_table.setItem(i, 2, QTableWidgetItem(f"{precision_0:.4f}"))
-                        self.results_table.setItem(i, 3, QTableWidgetItem(f"{recall_0:.4f}"))
-                        self.results_table.setItem(i, 4, QTableWidgetItem(f"{precision_1:.4f}"))
-                        self.results_table.setItem(i, 5, QTableWidgetItem(f"{recall_1:.4f}"))
-                        self.results_table.setItem(i, 6, QTableWidgetItem(f"{f1_score:.4f}"))
+                        # Сохраняем значения для нахождения лучших
+                        metrics_values['precision_0'].append(float(precision_0))
+                        metrics_values['recall_0'].append(float(recall_0))
+                        metrics_values['precision_1'].append(float(precision_1))
+                        metrics_values['recall_1'].append(float(recall_1))
+                        metrics_values['f1_score'].append(float(f1_score))
+                        
+                        # Устанавливаем метрики в таблицу с всплывающими подсказками
+                        precision_0_item = QTableWidgetItem(f"{precision_0:.4f}")
+                        precision_0_item.setToolTip("Доля правильно предсказанных отрицательных примеров среди всех примеров, предсказанных как отрицательные")
+                        precision_0_item.setData(Qt.UserRole, float(precision_0))  # Для сортировки
+                        self.results_table.setItem(i, 2, precision_0_item)
+                        
+                        recall_0_item = QTableWidgetItem(f"{recall_0:.4f}")
+                        recall_0_item.setToolTip("Доля правильно предсказанных отрицательных примеров среди всех отрицательных примеров")
+                        recall_0_item.setData(Qt.UserRole, float(recall_0))  # Для сортировки
+                        self.results_table.setItem(i, 3, recall_0_item)
+                        
+                        precision_1_item = QTableWidgetItem(f"{precision_1:.4f}")
+                        precision_1_item.setToolTip("Доля правильно предсказанных положительных примеров среди всех примеров, предсказанных как положительные")
+                        precision_1_item.setData(Qt.UserRole, float(precision_1))  # Для сортировки
+                        self.results_table.setItem(i, 4, precision_1_item)
+                        
+                        recall_1_item = QTableWidgetItem(f"{recall_1:.4f}")
+                        recall_1_item.setToolTip("Доля правильно предсказанных положительных примеров среди всех положительных примеров")
+                        recall_1_item.setData(Qt.UserRole, float(recall_1))  # Для сортировки
+                        self.results_table.setItem(i, 5, recall_1_item)
+                        
+                        f1_item = QTableWidgetItem(f"{f1_score:.4f}")
+                        f1_item.setToolTip("Гармоническое среднее между precision и recall для положительного класса")
+                        f1_item.setData(Qt.UserRole, float(f1_score))  # Для сортировки
+                        self.results_table.setItem(i, 6, f1_item)
                     else:
                         # Заполняем заглушками
                         for j in range(2, 7):
-                            self.results_table.setItem(i, j, QTableWidgetItem("N/A"))
+                            empty_item = QTableWidgetItem("N/A")
+                            empty_item.setData(Qt.UserRole, -1)  # Для сортировки
+                            self.results_table.setItem(i, j, empty_item)
+                            metrics_values[list(metrics_values.keys())[j-1]].append(-1)
                     
             else:
                 # Если проводился только анализ шума (без сравнения), показываем только результаты ансамбля
                 self.results_table.setRowCount(1)
-                self.results_table.setItem(0, 0, QTableWidgetItem("Ensemble NN"))
+                model_item = QTableWidgetItem("Ensemble NN")
+                model_item.setToolTip("Ансамбль нейронных сетей с оптимизированными гиперпараметрами")
+                self.results_table.setItem(0, 0, model_item)
                 
                 # Пытаемся получить точность из файла результатов
                 try:
@@ -911,7 +982,11 @@ class MonksGUI(QMainWindow):
                         noise_results = json.load(f)
                         
                     baseline_accuracy = noise_results.get('baseline_accuracy', 0.0)
-                    self.results_table.setItem(0, 1, QTableWidgetItem(f"{baseline_accuracy:.4f}"))
+                    accuracy_item = QTableWidgetItem(f"{baseline_accuracy:.4f}")
+                    accuracy_item.setToolTip("Доля правильно классифицированных примеров")
+                    accuracy_item.setData(Qt.UserRole, float(baseline_accuracy))
+                    self.results_table.setItem(0, 1, accuracy_item)
+                    metrics_values['accuracy'].append(float(baseline_accuracy))
                     
                     # Пытаемся загрузить матрицу ошибок для расчета метрик
                     try:
@@ -924,9 +999,9 @@ class MonksGUI(QMainWindow):
                                 # Расчет precision и recall для классов 0 и 1
                                 tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
                                 
-                                # Для класса 0
-                                precision_0 = tn / (tn + fn) if (tn + fn) > 0 else 0
-                                recall_0 = tn / (tn + fp) if (tn + fp) > 0 else 0
+                                # Для класса 0 (исправленные формулы)
+                                precision_0 = tn / (tn + fp) if (tn + fp) > 0 else 0
+                                recall_0 = tn / (tn + fn) if (tn + fn) > 0 else 0
                                 
                                 # Для класса 1
                                 precision_1 = tp / (tp + fp) if (tp + fp) > 0 else 0
@@ -935,12 +1010,38 @@ class MonksGUI(QMainWindow):
                                 # F1-score
                                 f1_score = 2 * (precision_1 * recall_1) / (precision_1 + recall_1) if (precision_1 + recall_1) > 0 else 0
                                 
-                                # Устанавливаем метрики в таблицу
-                                self.results_table.setItem(0, 2, QTableWidgetItem(f"{precision_0:.4f}"))
-                                self.results_table.setItem(0, 3, QTableWidgetItem(f"{recall_0:.4f}"))
-                                self.results_table.setItem(0, 4, QTableWidgetItem(f"{precision_1:.4f}"))
-                                self.results_table.setItem(0, 5, QTableWidgetItem(f"{recall_1:.4f}"))
-                                self.results_table.setItem(0, 6, QTableWidgetItem(f"{f1_score:.4f}"))
+                                # Сохраняем значения для нахождения лучших
+                                metrics_values['precision_0'].append(float(precision_0))
+                                metrics_values['recall_0'].append(float(recall_0))
+                                metrics_values['precision_1'].append(float(precision_1))
+                                metrics_values['recall_1'].append(float(recall_1))
+                                metrics_values['f1_score'].append(float(f1_score))
+                                
+                                # Устанавливаем метрики в таблицу с всплывающими подсказками
+                                precision_0_item = QTableWidgetItem(f"{precision_0:.4f}")
+                                precision_0_item.setToolTip("Доля правильно предсказанных отрицательных примеров среди всех примеров, предсказанных как отрицательные")
+                                precision_0_item.setData(Qt.UserRole, float(precision_0))
+                                self.results_table.setItem(0, 2, precision_0_item)
+                                
+                                recall_0_item = QTableWidgetItem(f"{recall_0:.4f}")
+                                recall_0_item.setToolTip("Доля правильно предсказанных отрицательных примеров среди всех отрицательных примеров")
+                                recall_0_item.setData(Qt.UserRole, float(recall_0))
+                                self.results_table.setItem(0, 3, recall_0_item)
+                                
+                                precision_1_item = QTableWidgetItem(f"{precision_1:.4f}")
+                                precision_1_item.setToolTip("Доля правильно предсказанных положительных примеров среди всех примеров, предсказанных как положительные")
+                                precision_1_item.setData(Qt.UserRole, float(precision_1))
+                                self.results_table.setItem(0, 4, precision_1_item)
+                                
+                                recall_1_item = QTableWidgetItem(f"{recall_1:.4f}")
+                                recall_1_item.setToolTip("Доля правильно предсказанных положительных примеров среди всех положительных примеров")
+                                recall_1_item.setData(Qt.UserRole, float(recall_1))
+                                self.results_table.setItem(0, 5, recall_1_item)
+                                
+                                f1_item = QTableWidgetItem(f"{f1_score:.4f}")
+                                f1_item.setToolTip("Гармоническое среднее между precision и recall для положительного класса")
+                                f1_item.setData(Qt.UserRole, float(f1_score))
+                                self.results_table.setItem(0, 6, f1_item)
                         else:
                             # Если файла нет, используем примерную матрицу ошибок на основе точности
                             accuracy = baseline_accuracy
@@ -951,12 +1052,12 @@ class MonksGUI(QMainWindow):
                                 [incorrect//2, correct//2]
                             ])
                             
-                            # Расчет метрик по той же схеме
+                            # Расчет метрик по той же схеме (исправленные формулы)
                             tn, fp, fn, tp = cm.ravel()
                             
                             # Для класса 0
-                            precision_0 = tn / (tn + fn) if (tn + fn) > 0 else 0
-                            recall_0 = tn / (tn + fp) if (tn + fp) > 0 else 0
+                            precision_0 = tn / (tn + fp) if (tn + fp) > 0 else 0
+                            recall_0 = tn / (tn + fn) if (tn + fn) > 0 else 0
                             
                             # Для класса 1
                             precision_1 = tp / (tp + fp) if (tp + fp) > 0 else 0
@@ -964,6 +1065,13 @@ class MonksGUI(QMainWindow):
                             
                             # F1-score
                             f1_score = 2 * (precision_1 * recall_1) / (precision_1 + recall_1) if (precision_1 + recall_1) > 0 else 0
+                            
+                            # Сохраняем значения для нахождения лучших
+                            metrics_values['precision_0'].append(float(precision_0))
+                            metrics_values['recall_0'].append(float(recall_0))
+                            metrics_values['precision_1'].append(float(precision_1))
+                            metrics_values['recall_1'].append(float(recall_1))
+                            metrics_values['f1_score'].append(float(f1_score))
                             
                             # Устанавливаем метрики в таблицу
                             self.results_table.setItem(0, 2, QTableWidgetItem(f"{precision_0:.4f}"))
@@ -973,17 +1081,39 @@ class MonksGUI(QMainWindow):
                             self.results_table.setItem(0, 6, QTableWidgetItem(f"{f1_score:.4f}"))
                     except:
                         # Если не удалось загрузить матрицу ошибок, устанавливаем примерные метрики
-                        self.results_table.setItem(0, 2, QTableWidgetItem("~0.9000"))
-                        self.results_table.setItem(0, 3, QTableWidgetItem("~0.9000"))
-                        self.results_table.setItem(0, 4, QTableWidgetItem("~0.9000"))
-                        self.results_table.setItem(0, 5, QTableWidgetItem("~0.9000"))
-                        self.results_table.setItem(0, 6, QTableWidgetItem("~0.9000"))
-                            
+                        for j, val in enumerate(["~0.9000", "~0.9000", "~0.9000", "~0.9000", "~0.9000"]):
+                            item = QTableWidgetItem(val)
+                            item.setToolTip("Примерное значение (точные данные недоступны)")
+                            item.setData(Qt.UserRole, 0.9)  # Примерное значение для сортировки
+                            self.results_table.setItem(0, j+2, item)
+                            metrics_values[list(metrics_values.keys())[j+1]].append(0.9)
                 except:
                     # Если не удалось загрузить результаты, ставим заглушки
                     for j in range(1, 7):
-                        self.results_table.setItem(0, j, QTableWidgetItem("N/A"))
-        
+                        item = QTableWidgetItem("N/A")
+                        item.setData(Qt.UserRole, -1)
+                        self.results_table.setItem(0, j, item)
+                        metrics_values[list(metrics_values.keys())[j-1]].append(-1)
+            
+            # Выделяем лучшие значения в каждом столбце (кроме названия модели)
+            for col in range(1, self.results_table.columnCount()):
+                # Получаем имя метрики для этого столбца
+                metric_name = list(metrics_values.keys())[col-1]
+                
+                # Находим максимальное значение
+                values = metrics_values[metric_name]
+                if values and max(values) > 0:  # Проверяем, что есть значения и они не все -1
+                    max_value = max(values)
+                    
+                    # Выделяем ячейки с максимальным значением
+                    for row in range(self.results_table.rowCount()):
+                        item = self.results_table.item(row, col)
+                        if item and item.data(Qt.UserRole) == max_value:
+                            item.setBackground(QColor(200, 255, 200))  # Светло-зеленый для лучших значений
+            
+            # Настраиваем сортировку таблицы
+            self.results_table.setSortingEnabled(True)
+            
         except Exception as e:
             # В случае ошибки отображаем сообщение
             QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить результаты классификации:\n{str(e)}")
@@ -1019,6 +1149,7 @@ class MonksGUI(QMainWindow):
                     for j in range(self.results_table.columnCount()):
                         item = self.results_table.item(i, j)
                         if item is not None:
+                            # Получаем текст из ячейки (не данные пользователя, которые использовались для сортировки)
                             row_data.append(item.text())
                         else:
                             row_data.append("")
