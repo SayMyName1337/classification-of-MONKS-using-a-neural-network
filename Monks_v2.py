@@ -2212,15 +2212,22 @@ def analyze_ensemble_size(problem_number, max_ensemble_size=15, noise_levels=Non
 
 # Добавьте в самый конец вашего файла Monks_v2.py, сразу перед блоком "if __name__ == "__main__":"
 
-def run_super_ensemble(problem_number, nn_ensemble_size=5, run_hyperopt=False, n_trials=50):
+def run_super_ensemble(problem_number, nn_ensemble_size=5, run_hyperopt=False, n_trials=50,
+                    analyze_noise=True, run_comparative=True,
+                    min_noise=0.0, max_noise=0.5, noise_step=0.1):
     """
-    Запускает расширенный суперансамбль для задачи MONK.
+    Запускает расширенный суперансамбль для задачи MONK с анализом шума.
     
     Args:
         problem_number: Номер задачи MONK (1, 2, или 3)
         nn_ensemble_size: Размер ансамбля нейронных сетей
         run_hyperopt: Выполнять ли оптимизацию гиперпараметров
         n_trials: Количество попыток для оптимизации гиперпараметров
+        analyze_noise: Выполнять ли анализ устойчивости к шуму
+        run_comparative: Выполнять ли сравнительный анализ с другими алгоритмами
+        min_noise: Минимальный уровень шума (0.0 - 1.0)
+        max_noise: Максимальный уровень шума (0.0 - 1.0)
+        noise_step: Шаг изменения уровня шума (0.0 - 1.0)
         
     Returns:
         SuperEnsemble: Обученный суперансамбль
@@ -2303,22 +2310,225 @@ def run_super_ensemble(problem_number, nn_ensemble_size=5, run_hyperopt=False, n
     logger.info("Оценка SuperEnsemble на тестовой выборке")
     results = super_ensemble.evaluate(X_test, y_test)
     
-    # Сравниваем с базовым EnsembleClassifier
-    logger.info("Сравнение с базовым ансамблем")
-    base_ensemble = EnsembleClassifier(problem_number, best_params, num_models=nn_ensemble_size)
-    base_ensemble.build_ensemble(X_train, y_train, X_val, y_val)
-    base_results = base_ensemble.evaluate(X_test, y_test)
+    # # Сравниваем с базовым EnsembleClassifier
+    # logger.info("Сравнение с базовым ансамблем")
+    # base_ensemble = EnsembleClassifier(problem_number, best_params, num_models=nn_ensemble_size)
+    # base_ensemble.build_ensemble(X_train, y_train, X_val, y_val)
+    # base_results = base_ensemble.evaluate(X_test, y_test)
     
-    logger.info(f"SuperEnsemble: accuracy={results['accuracy']:.4f}, ROC AUC={results.get('roc_auc', 'N/A')}")
-    logger.info(f"Base Ensemble: accuracy={base_results['accuracy']:.4f}, ROC AUC={base_results.get('roc_auc', 'N/A')}")
+    # logger.info(f"SuperEnsemble: accuracy={results['accuracy']:.4f}, ROC AUC={results.get('roc_auc', 'N/A')}")
+    # logger.info(f"Base Ensemble: accuracy={base_results['accuracy']:.4f}, ROC AUC={base_results.get('roc_auc', 'N/A')}")
     
-    # Выводим время выполнения
-    elapsed_time = time.time() - start_time
-    logger.info(f"Время выполнения: {elapsed_time:.2f} секунд")
+    # # Выводим время выполнения
+    # elapsed_time = time.time() - start_time
+    # logger.info(f"Время выполнения: {elapsed_time:.2f} секунд")
+    
+    if run_comparative:
+        logger.info("Сравнительный анализ суперансамбля с другими алгоритмами")
+        comparative = ComparativeAnalyzer(super_ensemble, problem_number)
+        comparative.train_baseline_models(X_train, y_train)
+        
+        # Создаем массив уровней шума на основе параметров
+        noise_levels = np.arange(min_noise, max_noise + noise_step/2, noise_step).tolist()
+        
+        # Проводим сравнительный анализ
+        comparative_results = comparative.analyze_noise_resistance(
+            X_test, y_test,
+            noise_types=['gaussian', 'uniform', 'impulse', 'missing'],
+            noise_levels=noise_levels,
+            n_experiments=3
+        )
+    
+    # Анализ устойчивости к шуму отдельной модели
+    if analyze_noise and not run_comparative:
+        logger.info("Анализ устойчивости суперансамбля к шуму")
+        
+        # Создаем класс для анализа шума
+        class NoiseAnalyzer:
+            @staticmethod
+            def add_noise(X, noise_level, noise_type='gaussian'):
+                logger.info(f"Добавление {noise_type} шума с уровнем {noise_level:.2f}")
+                
+                if noise_level <= 0:
+                    return X
+                    
+                X_noisy = X.copy()
+                n_samples, n_features = X.shape
+                
+                # Количество примеров для добавления шума (согласно уровню шума)
+                n_noisy_samples = int(noise_level * n_samples)
+                noisy_indices = np.random.choice(n_samples, n_noisy_samples, replace=False)
+                
+                # Статистики признаков для реалистичного шума
+                feature_means = np.mean(X, axis=0)
+                feature_stds = np.std(X, axis=0)
+                feature_mins = np.min(X, axis=0)
+                feature_maxs = np.max(X, axis=0)
+                
+                # Для каждого зашумляемого примера
+                for idx in noisy_indices:
+                    # Выбираем случайное количество признаков для зашумления
+                    n_features_to_noise = np.random.randint(1, n_features + 1)
+                    features_to_noise = np.random.choice(n_features, n_features_to_noise, replace=False)
+                    
+                    # Добавляем шум к выбранным признакам
+                    for feature_idx in features_to_noise:
+                        feature_range = feature_maxs[feature_idx] - feature_mins[feature_idx]
+                        
+                        if noise_type == 'gaussian':
+                            # Гауссовский шум, масштабируемый к стандартному отклонению признака
+                            noise = np.random.normal(0, feature_stds[feature_idx])
+                            X_noisy[idx, feature_idx] += noise
+                            
+                        elif noise_type == 'uniform':
+                            # Равномерный шум в пределах диапазона признака
+                            noise = np.random.uniform(-0.5, 0.5) * feature_range
+                            X_noisy[idx, feature_idx] += noise
+                            
+                        elif noise_type == 'impulse':
+                            # Импульсный шум - замена на экстремальные значения
+                            impulse_type = np.random.choice(['min', 'max', 'extreme'])
+                            if impulse_type == 'min':
+                                X_noisy[idx, feature_idx] = feature_mins[feature_idx]
+                            elif impulse_type == 'max':
+                                X_noisy[idx, feature_idx] = feature_maxs[feature_idx]
+                            else:  # extreme
+                                extreme_factor = np.random.choice([-2, 2])
+                                X_noisy[idx, feature_idx] = feature_means[feature_idx] + extreme_factor * feature_stds[feature_idx]
+                                
+                        elif noise_type == 'missing':
+                            # Замена на NaN (требует предобработки перед использованием)
+                            X_noisy[idx, feature_idx] = np.nan
+                
+                # Если есть пропущенные значения, заполняем их средними (импутация)
+                if noise_type == 'missing':
+                    for j in range(n_features):
+                        mask = np.isnan(X_noisy[:, j])
+                        X_noisy[mask, j] = np.mean(X_noisy[~mask, j])
+                
+                return X_noisy
+            
+            @staticmethod
+            def analyze_noise_resistance(ensemble, X, y, noise_types=None, noise_levels=None, n_experiments=5):
+                if noise_types is None:
+                    noise_types = ['gaussian', 'uniform', 'impulse']
+                    
+                if noise_levels is None:
+                    noise_levels = np.arange(min_noise, max_noise + noise_step/2, noise_step).tolist()
+                    
+                logger.info(f"Анализ устойчивости к шуму: {len(noise_types)} типов, {len(noise_levels)} уровней, {n_experiments} экспериментов")
+                
+                # Получаем базовую точность (без шума)
+                baseline_preds, _ = ensemble.predict(X)
+                baseline_accuracy = accuracy_score(y, baseline_preds)
+                logger.info(f"Базовая точность (без шума): {baseline_accuracy:.4f}")
+                
+                # Структура для хранения результатов
+                results = {
+                    'noise_types': noise_types,
+                    'noise_levels': noise_levels,
+                    'baseline_accuracy': baseline_accuracy,
+                    'accuracies': {}
+                }
+                
+                # Для каждого типа шума
+                for noise_type in noise_types:
+                    results['accuracies'][noise_type] = []
+                    
+                    # Для каждого уровня шума
+                    for noise_level in noise_levels:
+                        level_accuracies = []
+                        
+                        # Повторяем эксперимент несколько раз
+                        for exp in range(n_experiments):
+                            # Добавляем шум
+                            X_noisy = NoiseAnalyzer.add_noise(X, noise_level, noise_type)
+                            
+                            # Делаем предсказание
+                            preds, _ = ensemble.predict(X_noisy)
+                            
+                            # Вычисляем точность
+                            accuracy = accuracy_score(y, preds)
+                            level_accuracies.append(accuracy)
+                        
+                        # Сохраняем средний результат
+                        mean_accuracy = np.mean(level_accuracies)
+                        std_accuracy = np.std(level_accuracies)
+                        
+                        results['accuracies'][noise_type].append({
+                            'level': float(noise_level),
+                            'mean_accuracy': float(mean_accuracy),
+                            'std_accuracy': float(std_accuracy),
+                            'experiments': [float(acc) for acc in level_accuracies]
+                        })
+                        
+                        logger.info(f"Шум '{noise_type}' уровня {noise_level:.1f}: точность = {mean_accuracy:.4f} (±{std_accuracy:.4f})")
+                
+                # Визуализация результатов
+                NoiseAnalyzer.visualize_noise_resistance(results, ensemble.problem_number)
+                
+                # Сохраняем результаты
+                with open(RESULTS_DIR / f"noise_analysis_monk{ensemble.problem_number}.json", 'w') as f:
+                    json.dump(results, f, indent=2)
+                    
+                return results
+            
+            @staticmethod
+            def visualize_noise_resistance(results, problem_number):
+                fig, ax = plt.subplots(figsize=(12, 8))
+                
+                # Строим график для каждого типа шума
+                for noise_type in results['noise_types']:
+                    noise_data = results['accuracies'][noise_type]
+                    levels = [data['level'] for data in noise_data]
+                    accuracies = [data['mean_accuracy'] for data in noise_data]
+                    errors = [data['std_accuracy'] for data in noise_data]
+                    
+                    ax.errorbar(
+                        levels, 
+                        accuracies, 
+                        yerr=errors, 
+                        marker='o', 
+                        linestyle='-', 
+                        capsize=5, 
+                        label=f'{noise_type.capitalize()} Noise'
+                    )
+                
+                # Добавляем базовую линию (без шума)
+                ax.axhline(
+                    y=results['baseline_accuracy'], 
+                    color='black', 
+                    linestyle='--', 
+                    label=f'Baseline (No Noise): {results["baseline_accuracy"]:.4f}'
+                )
+                
+                # Настраиваем график
+                ax.set_title(f'Устойчивость к шуму для MONK-{problem_number}', fontsize=16)
+                ax.set_xlabel('Уровень шума', fontsize=14)
+                ax.set_ylabel('Точность', fontsize=14)
+                ax.set_ylim(0, 1.05)
+                ax.set_xlim(-0.02, max(results['noise_levels']) + 0.02)
+                ax.grid(True, alpha=0.3)
+                ax.legend(fontsize=12)
+                
+                # Сохраняем график
+                plt.tight_layout()
+                plt.savefig(RESULTS_DIR / f"noise_resistance_monk{problem_number}.png", dpi=300)
+                plt.close()
+        
+        # Создаем массив уровней шума на основе параметров
+        noise_levels = np.arange(min_noise, max_noise + noise_step/2, noise_step).tolist()
+
+        # Анализируем устойчивость к шуму
+        noise_analysis = NoiseAnalyzer.analyze_noise_resistance(
+            super_ensemble, X_test, y_test,
+            noise_types=['gaussian', 'uniform', 'impulse', 'missing'],
+            noise_levels=[0, 0.1, 0.2, 0.3, 0.4, 0.5],
+            n_experiments=3
+        )
     
     return super_ensemble
 
-# Обновите блок if __name__ == "__main__": в вашем файле Monks_v2.py
 
 if __name__ == "__main__":
     print("=== Запуск оптимального классификатора для набора данных MONK ===")
@@ -2333,9 +2543,6 @@ if __name__ == "__main__":
                 print("Пожалуйста, введите 1, 2 или 3.")
         except ValueError:
             print("Пожалуйста, введите число.")
-    
-    # Выбор типа ансамбля
-    ensemble_type = input("Выберите тип ансамбля:\n1. Базовый ансамбль\n2. SuperEnsemble (с дополнительными алгоритмами)\nВыбор (1/2, по умолчанию: 1): ") or "1"
     
     # Запрос параметров запуска
     run_hyperopt = input("Выполнить оптимизацию гиперпараметров? (y/n, по умолчанию: y): ").lower() != 'n'
@@ -2363,6 +2570,55 @@ if __name__ == "__main__":
         except ValueError:
             print("Пожалуйста, введите целое число.")
     
+    # Опция выбора типа анализа (только шум или сравнительный)
+    analyze_option = input("Выберите тип анализа:\n1. Только анализ шума\n2. Сравнительный анализ с другими алгоритмами\nВыбор (1/2, по умолчанию: 2): ") or "2"
+    analyze_noise = analyze_option == "1"
+    run_comparative = analyze_option == "2"
+    
+    # Если выбран анализ шума, запрашиваем параметры шума
+    min_noise = 0.0
+    max_noise = 0.5
+    noise_step = 0.1
+    
+    if analyze_noise or run_comparative:
+        print("\n=== Настройка параметров шума ===")
+        while True:
+            try:
+                min_noise = float(input("Минимальный уровень шума в % (по умолчанию: 0): ") or "0") / 100
+                if 0 <= min_noise <= 1:
+                    break
+                else:
+                    print("Пожалуйста, введите значение от 0 до 100.")
+            except ValueError:
+                print("Пожалуйста, введите число.")
+                
+        while True:
+            try:
+                max_noise = float(input("Максимальный уровень шума в % (по умолчанию: 50): ") or "50") / 100
+                if min_noise <= max_noise <= 1:
+                    break
+                else:
+                    print(f"Пожалуйста, введите значение от {min_noise*100} до 100.")
+            except ValueError:
+                print("Пожалуйста, введите число.")
+                
+        while True:
+            try:
+                noise_step = float(input("Шаг изменения уровня шума в % (по умолчанию: 10): ") or "10") / 100
+                if 0 < noise_step <= (max_noise - min_noise + 0.0001):
+                    break
+                else:
+                    print(f"Пожалуйста, введите положительное значение, не превышающее {(max_noise - min_noise) * 100:.1f}%.")
+            except ValueError:
+                print("Пожалуйста, введите число.")
+        
+        # Показываем пользователю рассчитанные уровни шума
+        noise_levels = np.arange(min_noise, max_noise + noise_step/2, noise_step)
+        print(f"\nБудут рассчитаны следующие уровни шума: {[f'{level*100:.1f}%' for level in noise_levels]}")
+    
+    # Выбор типа ансамбля
+    ensemble_type = input("\nВыберите тип ансамбля:\n1. Базовый ансамбль\n2. SuperEnsemble (с дополнительными алгоритмами)\nВыбор (1/2, по умолчанию: 1): ") or "1"
+    
     # Запуск выбранного типа ансамбля
     if ensemble_type == "1":
         # Базовый ансамбль
@@ -2372,7 +2628,12 @@ if __name__ == "__main__":
                 problem_number, 
                 run_hyperopt=run_hyperopt, 
                 n_trials=n_trials, 
-                ensemble_size=ensemble_size
+                ensemble_size=ensemble_size,
+                analyze_noise=analyze_noise,
+                run_comparative=run_comparative,
+                min_noise=min_noise,
+                max_noise=max_noise,
+                noise_step=noise_step
             )
             
             print("\n=== Обучение и оценка завершены ===")
@@ -2390,7 +2651,12 @@ if __name__ == "__main__":
                 problem_number,
                 nn_ensemble_size=ensemble_size,
                 run_hyperopt=run_hyperopt,
-                n_trials=n_trials
+                n_trials=n_trials,
+                analyze_noise=analyze_noise,
+                run_comparative=run_comparative,
+                min_noise=min_noise,
+                max_noise=max_noise,
+                noise_step=noise_step
             )
             
             print("\n=== Обучение и оценка SuperEnsemble завершены ===")
