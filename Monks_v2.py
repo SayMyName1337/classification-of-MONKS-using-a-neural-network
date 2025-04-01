@@ -2210,6 +2210,116 @@ def analyze_ensemble_size(problem_number, max_ensemble_size=15, noise_levels=Non
     
     return results
 
+# Добавьте в самый конец вашего файла Monks_v2.py, сразу перед блоком "if __name__ == "__main__":"
+
+def run_super_ensemble(problem_number, nn_ensemble_size=5, run_hyperopt=False, n_trials=50):
+    """
+    Запускает расширенный суперансамбль для задачи MONK.
+    
+    Args:
+        problem_number: Номер задачи MONK (1, 2, или 3)
+        nn_ensemble_size: Размер ансамбля нейронных сетей
+        run_hyperopt: Выполнять ли оптимизацию гиперпараметров
+        n_trials: Количество попыток для оптимизации гиперпараметров
+        
+    Returns:
+        SuperEnsemble: Обученный суперансамбль
+    """
+    from super_ensemble import SuperEnsemble
+    
+    logger.info(f"=== Запуск SuperEnsemble для MONK-{problem_number} ===")
+    start_time = time.time()
+    
+    # Загрузка и подготовка данных
+    X_train, y_train, X_test, y_test = DataLoader.load_monks_data(problem_number)
+    logger.info(f"Загружены данные: {X_train.shape[1]} признаков")
+    
+    # Разделение на обучающую и валидационную выборки
+    X_train_subset, X_val, y_train_subset, y_val = train_test_split(
+        X_train, y_train, test_size=0.2, random_state=RANDOM_SEED, stratify=y_train
+    )
+    
+    # Оптимизация гиперпараметров или загрузка ранее найденных
+    if run_hyperopt:
+        logger.info("Запуск оптимизации гиперпараметров")
+        best_params = HyperOptimizer.optimize_hyperparameters(
+            X_train_subset, y_train_subset, X_val, y_val, 
+            problem_number, n_trials=n_trials
+        )
+    else:
+        # Попытка загрузить ранее сохраненные результаты оптимизации
+        try:
+            result_path = RESULTS_DIR / f"hyperopt_results_monk{problem_number}.pkl"
+            if result_path.exists():
+                with open(result_path, "rb") as f:
+                    study = pickle.load(f)
+                best_params = study.best_params
+                logger.info(f"Загружены ранее найденные гиперпараметры: {best_params}")
+            else:
+                logger.warning("Файл с результатами оптимизации не найден, используем значения по умолчанию")
+                # Значения по умолчанию
+                best_params = {
+                    'n_layers': 3,
+                    'units_first': 64,
+                    'activation': 'relu',
+                    'use_batch_norm': True,
+                    'dropout_rate': 0.3,
+                    'use_residual': False,
+                    'learning_rate': 0.001,
+                    'batch_size': 32,
+                    'optimizer': 'adam',
+                    'use_regularization': False,
+                    'l1_factor': 0,
+                    'l2_factor': 0
+                }
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке гиперпараметров: {str(e)}")
+            best_params = {
+                'n_layers': 3,
+                'units_first': 64,
+                'activation': 'relu',
+                'use_batch_norm': True,
+                'dropout_rate': 0.3,
+                'use_residual': False,
+                'learning_rate': 0.001,
+                'batch_size': 32,
+                'optimizer': 'adam',
+                'use_regularization': False,
+                'l1_factor': 0,
+                'l2_factor': 0
+            }
+    
+    # Создание и обучение SuperEnsemble
+    super_ensemble = SuperEnsemble(
+        problem_number=problem_number,
+        base_params=best_params,
+        nn_ensemble_size=nn_ensemble_size
+    )
+    
+    # Обучаем на всей обучающей выборке
+    super_ensemble.fit(X_train, y_train, X_val, y_val)
+    
+    # Оценка на тестовой выборке
+    logger.info("Оценка SuperEnsemble на тестовой выборке")
+    results = super_ensemble.evaluate(X_test, y_test)
+    
+    # Сравниваем с базовым EnsembleClassifier
+    logger.info("Сравнение с базовым ансамблем")
+    base_ensemble = EnsembleClassifier(problem_number, best_params, num_models=nn_ensemble_size)
+    base_ensemble.build_ensemble(X_train, y_train, X_val, y_val)
+    base_results = base_ensemble.evaluate(X_test, y_test)
+    
+    logger.info(f"SuperEnsemble: accuracy={results['accuracy']:.4f}, ROC AUC={results.get('roc_auc', 'N/A')}")
+    logger.info(f"Base Ensemble: accuracy={base_results['accuracy']:.4f}, ROC AUC={base_results.get('roc_auc', 'N/A')}")
+    
+    # Выводим время выполнения
+    elapsed_time = time.time() - start_time
+    logger.info(f"Время выполнения: {elapsed_time:.2f} секунд")
+    
+    return super_ensemble
+
+# Обновите блок if __name__ == "__main__": в вашем файле Monks_v2.py
+
 if __name__ == "__main__":
     print("=== Запуск оптимального классификатора для набора данных MONK ===")
     
@@ -2223,6 +2333,9 @@ if __name__ == "__main__":
                 print("Пожалуйста, введите 1, 2 или 3.")
         except ValueError:
             print("Пожалуйста, введите число.")
+    
+    # Выбор типа ансамбля
+    ensemble_type = input("Выберите тип ансамбля:\n1. Базовый ансамбль\n2. SuperEnsemble (с дополнительными алгоритмами)\nВыбор (1/2, по умолчанию: 1): ") or "1"
     
     # Запрос параметров запуска
     run_hyperopt = input("Выполнить оптимизацию гиперпараметров? (y/n, по умолчанию: y): ").lower() != 'n'
@@ -2250,71 +2363,40 @@ if __name__ == "__main__":
         except ValueError:
             print("Пожалуйста, введите целое число.")
     
-    # Опция выбора типа анализа (только шум или сравнительный)
-    analyze_option = input("Выберите тип анализа:\n1. Только анализ шума\n2. Сравнительный анализ с другими алгоритмами\nВыбор (1/2, по умолчанию: 2): ") or "2"
-    analyze_noise = analyze_option == "1"
-    run_comparative = analyze_option == "2"
-    
-    # Если выбран анализ шума, запрашиваем параметры шума
-    min_noise = 0.0
-    max_noise = 0.5
-    noise_step = 0.1
-    
-    if analyze_noise or run_comparative:
-        print("\n=== Настройка параметров шума ===")
-        while True:
-            try:
-                min_noise = float(input("Минимальный уровень шума в % (по умолчанию: 0): ") or "0") / 100
-                if 0 <= min_noise <= 1:
-                    break
-                else:
-                    print("Пожалуйста, введите значение от 0 до 100.")
-            except ValueError:
-                print("Пожалуйста, введите число.")
-                
-        while True:
-            try:
-                max_noise = float(input("Максимальный уровень шума в % (по умолчанию: 50): ") or "50") / 100
-                if min_noise <= max_noise <= 1:
-                    break
-                else:
-                    print(f"Пожалуйста, введите значение от {min_noise*100} до 100.")
-            except ValueError:
-                print("Пожалуйста, введите число.")
-                
-        while True:
-            try:
-                noise_step = float(input("Шаг изменения уровня шума в % (по умолчанию: 10): ") or "10") / 100
-                if 0 < noise_step <= (max_noise - min_noise + 0.0001):
-                    break
-                else:
-                    print(f"Пожалуйста, введите положительное значение, не превышающее {(max_noise - min_noise) * 100:.1f}%.")
-            except ValueError:
-                print("Пожалуйста, введите число.")
-        
-        # Показываем пользователю рассчитанные уровни шума
-        noise_levels = np.arange(min_noise, max_noise + noise_step/2, noise_step)
-        print(f"\nБудут рассчитаны следующие уровни шума: {[f'{level*100:.1f}%' for level in noise_levels]}")
-    
-    # Запуск классификатора
-    print(f"\nЗапуск классификатора для MONK-{problem_number}...")
-    try:
-        ensemble = run_optimal_classifier(
-            problem_number, 
-            run_hyperopt=run_hyperopt, 
-            n_trials=n_trials, 
-            ensemble_size=ensemble_size, 
-            analyze_noise=analyze_noise,
-            run_comparative=run_comparative,
-            min_noise=min_noise,
-            max_noise=max_noise,
-            noise_step=noise_step
-        )
-        
-        print("\n=== Обучение и оценка завершены ===")
-        print(f"Результаты сохранены в директории: {RESULTS_DIR}")
-        
-    except Exception as e:
-        print(f"\nОшибка: {str(e)}")
-        logger.exception("Необработанное исключение в основной программе")
-        raise
+    # Запуск выбранного типа ансамбля
+    if ensemble_type == "1":
+        # Базовый ансамбль
+        print(f"\nЗапуск базового ансамбля для MONK-{problem_number}...")
+        try:
+            ensemble = run_optimal_classifier(
+                problem_number, 
+                run_hyperopt=run_hyperopt, 
+                n_trials=n_trials, 
+                ensemble_size=ensemble_size
+            )
+            
+            print("\n=== Обучение и оценка завершены ===")
+            print(f"Результаты сохранены в директории: {RESULTS_DIR}")
+            
+        except Exception as e:
+            print(f"\nОшибка: {str(e)}")
+            logger.exception("Необработанное исключение в основной программе")
+            raise
+    else:
+        # SuperEnsemble
+        print(f"\nЗапуск SuperEnsemble для MONK-{problem_number}...")
+        try:
+            super_ensemble = run_super_ensemble(
+                problem_number,
+                nn_ensemble_size=ensemble_size,
+                run_hyperopt=run_hyperopt,
+                n_trials=n_trials
+            )
+            
+            print("\n=== Обучение и оценка SuperEnsemble завершены ===")
+            print(f"Результаты сохранены в директории: {RESULTS_DIR}")
+            
+        except Exception as e:
+            print(f"\nОшибка: {str(e)}")
+            logger.exception("Необработанное исключение в основной программе")
+            raise
