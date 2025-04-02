@@ -1,0 +1,22 @@
+{
+  "params": {
+    "n_layers": 4.0,
+    "units_first": 32.0,
+    "activation": "relu",
+    "use_batch_norm": 1.0,
+    "dropout_rate": 0.15215315374000454,
+    "use_residual": 1.0,
+    "learning_rate": 0.000577222815929346,
+    "batch_size": 8.0,
+    "optimizer": "adam",
+    "use_regularization": 0.0,
+    "l1_factor": 0.0,
+    "l2_factor": 0.0
+  },
+  "layer_config": [
+    64,
+    32
+  ],
+  "val_accuracy": 1.0,
+  "epochs_trained": 119
+}

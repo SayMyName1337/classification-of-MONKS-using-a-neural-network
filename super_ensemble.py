@@ -158,9 +158,15 @@ class SuperEnsemble:
             )
             meta_model.fit(meta_features, y_val)
             self.meta_model = meta_model
-            
-            # Оптимизируем веса (простой вариант)
-            self._optimize_simple_weights(meta_features, y_val)
+
+            # Пробуем использовать генетическую оптимизацию, если не получится - используем простую
+            try:
+                genetic_weights = self._optimize_genetic_weights(meta_features, y_val)
+                if genetic_weights is None:
+                    self._optimize_simple_weights(meta_features, y_val)
+            except Exception as e:
+                logger.warning(f"Ошибка при генетической оптимизации: {str(e)}")
+                self._optimize_simple_weights(meta_features, y_val)
             
             logger.info("Мета-модель обучена успешно")
         except Exception as e:
@@ -288,3 +294,103 @@ class SuperEnsemble:
         
         logger.info(f"Оценка SuperEnsemble: accuracy={accuracy:.4f}, roc_auc={roc_auc:.4f}")
         return results
+    
+    def _optimize_genetic_weights(self, meta_features, y_val, population_size=30, generations=50):
+        """Оптимизация весов с помощью генетического алгоритма."""
+        logger.info("Запуск генетической оптимизации весов")
+        
+        try:
+            import random
+            
+            n_models = meta_features.shape[1]
+            
+            # Функция фитнеса - точность взвешенного ансамбля
+            def fitness(weights):
+                weights_normalized = weights / np.sum(weights)  # Нормализация весов
+                weighted_preds = np.dot(meta_features, weights_normalized)
+                binary_preds = (weighted_preds > 0.5).astype(int)
+                return accuracy_score(y_val, binary_preds)
+            
+            # Инициализация популяции
+            population = []
+            for _ in range(population_size):
+                weights = np.random.uniform(0, 1, n_models)
+                population.append(weights)
+            
+            # Генетический алгоритм
+            best_fitness = 0
+            best_weights = None
+            
+            for gen in range(generations):
+                # Оценка фитнеса
+                fitness_scores = [fitness(weights) for weights in population]
+                
+                # Проверка лучшего результата
+                current_best = max(fitness_scores)
+                if current_best > best_fitness:
+                    best_fitness = current_best
+                    best_idx = fitness_scores.index(current_best)
+                    best_weights = population[best_idx].copy()
+                    logger.info(f"Поколение {gen + 1}/{generations}: Новый лучший результат = {best_fitness:.4f}")
+                
+                # Выбор лучших особей
+                elite_size = max(1, int(population_size * 0.2))
+                elite_indices = np.argsort(fitness_scores)[-elite_size:]
+                elite = [population[i] for i in elite_indices]
+                
+                # Создание нового поколения
+                new_population = elite.copy()
+                
+                # Кроссовер и мутация
+                while len(new_population) < population_size:
+                    # Выбор родителей
+                    parent1, parent2 = random.sample(elite, 2)
+                    
+                    # Кроссовер
+                    crossover_point = random.randint(1, n_models-1)
+                    child = np.concatenate([parent1[:crossover_point], parent2[crossover_point:]])
+                    
+                    # Мутация (с небольшой вероятностью)
+                    if random.random() < 0.2:
+                        mutation_point = random.randint(0, n_models-1)
+                        child[mutation_point] *= random.uniform(0.8, 1.2)
+                    
+                    new_population.append(child)
+                
+                population = new_population
+            
+            # Нормализация лучших весов
+            if best_weights is not None:
+                best_weights = best_weights / np.sum(best_weights)
+                self.optimal_weights = best_weights
+                logger.info(f"Оптимизация завершена. Лучшая точность: {best_fitness:.4f}")
+                
+                # Вывод весов для ключевых моделей
+                top_indices = np.argsort(best_weights)[-5:]  # Топ-5 моделей
+                
+                # Сначала считаем индексы для нейронных сетей
+                nn_count = len(self.nn_ensemble.models)
+                other_models_names = list(self.additional_models.keys())
+                
+                weights_info = []
+                for idx in top_indices:
+                    if idx < nn_count:
+                        name = f"NeuralNet_{idx+1}"
+                    else:
+                        other_idx = idx - nn_count
+                        if other_idx < len(other_models_names):
+                            name = other_models_names[other_idx]
+                        else:
+                            name = f"Model_{idx}"
+                    weights_info.append(f"{name}: {best_weights[idx]:.4f}")
+                
+                logger.info(f"Топ-5 моделей по весам: {', '.join(weights_info)}")
+                
+                return best_weights
+            else:
+                logger.warning("Не удалось найти оптимальные веса")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Ошибка при генетической оптимизации: {str(e)}")
+            return None

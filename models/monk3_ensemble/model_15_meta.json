@@ -1,0 +1,23 @@
+{
+  "params": {
+    "n_layers": 4.0,
+    "units_first": 32.0,
+    "activation": "sigmoid",
+    "use_batch_norm": 1.0,
+    "dropout_rate": 0.35907266729383497,
+    "use_residual": 1.0,
+    "learning_rate": 0.0006911382140171216,
+    "batch_size": 128.0,
+    "optimizer": "adam",
+    "use_regularization": 1.0,
+    "l1_factor": 0.0,
+    "l2_factor": 1e-06
+  },
+  "layer_config": [
+    32,
+    32,
+    16
+  ],
+  "val_accuracy": 0.9200000166893005,
+  "epochs_trained": 300
+}

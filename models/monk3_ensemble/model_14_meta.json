@@ -1,0 +1,22 @@
+{
+  "params": {
+    "n_layers": 4.0,
+    "units_first": 32.0,
+    "activation": "tanh",
+    "use_batch_norm": 1.0,
+    "dropout_rate": 0.14983079925209972,
+    "use_residual": 1.0,
+    "learning_rate": 0.00885046038655588,
+    "batch_size": 64.0,
+    "optimizer": "adam",
+    "use_regularization": 1.0,
+    "l1_factor": 1e-06,
+    "l2_factor": 0.0
+  },
+  "layer_config": [
+    48,
+    9
+  ],
+  "val_accuracy": 1.0,
+  "epochs_trained": 300
+}
