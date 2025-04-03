@@ -1701,31 +1701,90 @@ class SuperEnsemble:
         logger.info(f"Оценка SuperEnsemble: accuracy={accuracy:.4f}, roc_auc={roc_auc:.4f}")
         return results
     
-    def _optimize_genetic_weights(self, meta_features, y_val, population_size=30, generations=50):
-        """Оптимизация весов с помощью генетического алгоритма."""
-        logger.info("Запуск генетической оптимизации весов")
+    def _optimize_genetic_weights(self, meta_features, y_val, population_size=30, generations=50, 
+                             elite_ratio=0.2, mutation_prob=0.2, crossover_types='uniform'):
+        """
+        Оптимизация весов моделей ансамбля с помощью генетического алгоритма.
+        
+        Args:
+            meta_features: Предсказания от всех моделей (shape: [n_samples, n_models])
+            y_val: Истинные метки для валидационных данных
+            population_size: Размер популяции для генетического алгоритма
+            generations: Количество поколений для эволюции
+            elite_ratio: Доля лучших особей, которые переходят в следующее поколение без изменений
+            mutation_prob: Вероятность мутации каждого гена
+            crossover_types: Тип кроссовера ('single', 'uniform' или 'both')
+            
+        Returns:
+            np.ndarray: Оптимизированные веса для каждой модели или None в случае ошибки
+        """
+        logger.info(f"Запуск генетической оптимизации весов (популяция: {population_size}, поколения: {generations})")
         
         try:
             import random
             
+            # Проверяем, что данные валидны
+            if meta_features.shape[0] != len(y_val):
+                logger.error(f"Несоответствие размеров данных: meta_features={meta_features.shape}, y_val={len(y_val)}")
+                return None
+                
             n_models = meta_features.shape[1]
+            
+            if n_models == 0:
+                logger.error("Нет моделей для оптимизации весов")
+                return None
+                
+            # Преобразуем целевые метки в numpy массив, если они еще не являются им
+            y_val = np.asarray(y_val)
             
             # Функция фитнеса - точность взвешенного ансамбля
             def fitness(weights):
-                weights_normalized = weights / np.sum(weights)  # Нормализация весов
+                # Проверка на нулевую сумму весов
+                sum_weights = np.sum(weights)
+                if sum_weights <= 0:
+                    return 0.0
+                    
+                # Нормализация весов
+                weights_normalized = weights / sum_weights
+                
+                # Взвешенные предсказания
                 weighted_preds = np.dot(meta_features, weights_normalized)
+                
+                # Преобразуем в бинарные метки
                 binary_preds = (weighted_preds > 0.5).astype(int)
+                
+                # Вычисляем и возвращаем точность
                 return accuracy_score(y_val, binary_preds)
             
-            # Инициализация популяции
+            # Инициализация популяции с разнообразными наборами весов
             population = []
-            for _ in range(population_size):
+            
+            # Стратегия 1: Равные веса для всех моделей
+            population.append(np.ones(n_models) / n_models)
+            
+            # Стратегия 2: Случайные веса
+            for _ in range(population_size // 3):
                 weights = np.random.uniform(0, 1, n_models)
+                population.append(weights)
+            
+            # Стратегия 3: Доминирование отдельных моделей
+            for _ in range(population_size // 3):
+                weights = np.random.uniform(0, 0.1, n_models)
+                dominant_idx = np.random.randint(0, n_models)
+                weights[dominant_idx] = np.random.uniform(0.5, 1.0)
+                population.append(weights)
+            
+            # Стратегия 4: Разреженные веса (часть моделей не используется)
+            while len(population) < population_size:
+                weights = np.zeros(n_models)
+                active_models = np.random.choice(n_models, np.random.randint(1, n_models + 1), replace=False)
+                weights[active_models] = np.random.uniform(0, 1, len(active_models))
                 population.append(weights)
             
             # Генетический алгоритм
             best_fitness = 0
             best_weights = None
+            stagnation_counter = 0  # Счетчик поколений без улучшения
             
             for gen in range(generations):
                 # Оценка фитнеса
@@ -1738,41 +1797,118 @@ class SuperEnsemble:
                     best_idx = fitness_scores.index(current_best)
                     best_weights = population[best_idx].copy()
                     logger.info(f"Поколение {gen + 1}/{generations}: Новый лучший результат = {best_fitness:.4f}")
+                    stagnation_counter = 0  # Сбрасываем счетчик
+                else:
+                    stagnation_counter += 1
                 
-                # Выбор лучших особей
-                elite_size = max(1, int(population_size * 0.2))
+                # Ранний останов при стагнации более 10 поколений и хорошей точности
+                if stagnation_counter > 10 and best_fitness > 0.95:
+                    logger.info(f"Ранний останов на поколении {gen + 1} (стагнация, достигнута точность {best_fitness:.4f})")
+                    break
+                    
+                # Выбор лучших особей (элитизм)
+                elite_size = max(1, int(population_size * elite_ratio))
                 elite_indices = np.argsort(fitness_scores)[-elite_size:]
                 elite = [population[i] for i in elite_indices]
                 
                 # Создание нового поколения
                 new_population = elite.copy()
                 
+                # Отбор родителей на основе фитнеса (турнирный отбор)
+                def select_parent():
+                    # Выбираем k особей случайно и возвращаем лучшую
+                    k = 3  # Размер турнира
+                    tournament_indices = np.random.choice(len(population), k, replace=False)
+                    tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+                    winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+                    return population[winner_idx]
+                
+                # Реализация различных типов кроссовера
+                def single_point_crossover(parent1, parent2):
+                    crossover_point = random.randint(1, n_models - 1)
+                    child = np.concatenate([parent1[:crossover_point], parent2[crossover_point:]])
+                    return child
+                    
+                def uniform_crossover(parent1, parent2):
+                    mask = np.random.randint(0, 2, n_models).astype(bool)
+                    child = np.copy(parent1)
+                    child[mask] = parent2[mask]
+                    return child
+                
                 # Кроссовер и мутация
                 while len(new_population) < population_size:
-                    # Выбор родителей
-                    parent1, parent2 = random.sample(elite, 2)
+                    # Выбор родителей с помощью турнирного отбора
+                    parent1 = select_parent()
+                    parent2 = select_parent()
                     
                     # Кроссовер
-                    crossover_point = random.randint(1, n_models-1)
-                    child = np.concatenate([parent1[:crossover_point], parent2[crossover_point:]])
+                    if crossover_types == 'single':
+                        child = single_point_crossover(parent1, parent2)
+                    elif crossover_types == 'uniform':
+                        child = uniform_crossover(parent1, parent2)
+                    else:  # 'both' - чередуем типы кроссовера
+                        if np.random.random() < 0.5:
+                            child = single_point_crossover(parent1, parent2)
+                        else:
+                            child = uniform_crossover(parent1, parent2)
                     
-                    # Мутация (с небольшой вероятностью)
-                    if random.random() < 0.2:
-                        mutation_point = random.randint(0, n_models-1)
-                        child[mutation_point] *= random.uniform(0.8, 1.2)
+                    # Мутация
+                    for i in range(n_models):
+                        if random.random() < mutation_prob:
+                            # Различные стратегии мутации
+                            mutation_type = random.choice(['scale', 'reset', 'small_nudge'])
+                            
+                            if mutation_type == 'scale':
+                                # Умножение на случайный коэффициент
+                                child[i] *= random.uniform(0.5, 1.5)
+                            elif mutation_type == 'reset':
+                                # Полный сброс значения
+                                child[i] = random.uniform(0, 1)
+                            else:  # 'small_nudge'
+                                # Небольшое смещение
+                                child[i] += random.uniform(-0.1, 0.1)
+                                child[i] = max(0, child[i])  # Гарантируем неотрицательность
                     
+                    # Добавляем потомка в новую популяцию
                     new_population.append(child)
                 
+                # Обновляем популяцию
                 population = new_population
+                
+                # Если мы достигли идеальной точности, останавливаемся
+                if best_fitness == 1.0:
+                    logger.info("Достигнута идеальная точность 1.0, останавливаем оптимизацию")
+                    break
+                    
+                # Адаптивная настройка вероятности мутации
+                # Увеличиваем вероятность мутации при стагнации
+                if stagnation_counter > 5:
+                    mutation_prob = min(0.4, mutation_prob * 1.2)
+                else:
+                    mutation_prob = max(0.1, mutation_prob * 0.9)
             
             # Нормализация лучших весов
             if best_weights is not None:
-                best_weights = best_weights / np.sum(best_weights)
+                # Обработка краевого случая с нулевой суммой весов
+                weight_sum = np.sum(best_weights)
+                if weight_sum <= 0:
+                    logger.warning("Сумма весов равна или меньше нуля, использование равных весов")
+                    best_weights = np.ones(n_models) / n_models
+                else:
+                    best_weights = best_weights / weight_sum
+                    
                 self.optimal_weights = best_weights
                 logger.info(f"Оптимизация завершена. Лучшая точность: {best_fitness:.4f}")
                 
-                # Вывод весов для ключевых моделей
-                top_indices = np.argsort(best_weights)[-5:]  # Топ-5 моделей
+                # Анализ и вывод информации о найденных весах
+                
+                # Находим значимые модели (с весом > 1%)
+                significant_indices = np.where(best_weights > 0.01)[0]
+                significant_count = len(significant_indices)
+                logger.info(f"Найдено {significant_count} значимых моделей (вес > 1%)")
+                
+                # Вывод весов для топ-5 моделей
+                top_indices = np.argsort(best_weights)[-5:][::-1]  # Топ-5 в порядке убывания
                 
                 # Сначала считаем индексы для нейронных сетей
                 nn_count = len(self.nn_ensemble.models)
@@ -1792,7 +1928,1158 @@ class SuperEnsemble:
                 
                 logger.info(f"Топ-5 моделей по весам: {', '.join(weights_info)}")
                 
+                # Проверяем, что результаты имеют смысл
+                total_weight = sum(best_weights[idx] for idx in top_indices)
+                logger.info(f"Топ-5 моделей содержат {total_weight:.2%} общего веса")
+                
+                # Проверяем, доминирует ли одна модель
+                if best_weights[top_indices[0]] > 0.5:
+                    logger.info(f"Обнаружена доминирующая модель: {weights_info[0]}")
+                
                 return best_weights
             else:
                 logger.warning("Не удалось найти оптимальные веса")
                 return None
+                
+        except Exception as e:
+            logger.error(f"Ошибка при генетической оптимизации: {str(e)}")
+            logger.exception("Подробности ошибки:")
+            return None
+    
+def analyze_ensemble_size(dataset_name, max_ensemble_size=15, noise_levels=None):
+    """
+    Запускает анализ зависимости точности от размера ансамбля.
+    
+    Args:
+        dataset_name: Название датасета
+        max_ensemble_size: Максимальный размер ансамбля для исследования
+        noise_levels: Список уровней шума
+    
+    Returns:
+        Результаты анализа
+    """
+    logger.info(f"=== Запуск анализа размера ансамбля для {dataset_name} ===")
+    start_time = time.time()
+    
+    # Загрузка данных
+    X_train, y_train, X_test, y_test = DataLoader.load_heart_disease_data()
+    
+    # Разделение на тренировочную и валидационную выборки
+    X_train_subset, X_val, y_train_subset, y_val = train_test_split(
+        X_train, y_train, test_size=0.2, random_state=RANDOM_SEED, stratify=y_train
+    )
+    
+    # Установка базовых гиперпараметров
+    base_params = {
+        'n_layers': 3,
+        'units_first': 64,
+        'activation': 'relu',
+        'use_batch_norm': True,
+        'dropout_rate': 0.3,
+        'use_residual': True,
+        'learning_rate': 0.001,
+        'batch_size': 32,
+        'optimizer': 'adam',
+        'use_regularization': True,
+        'l1_factor': 1e-5,
+        'l2_factor': 1e-4,
+    }
+    
+    # Результаты для разных размеров ансамбля
+    results = {
+        'ensemble_sizes': list(range(1, max_ensemble_size + 1)),
+        'dataset_name': dataset_name,
+        'accuracies': {}
+    }
+    
+    # Уровни шума по умолчанию
+    if noise_levels is None:
+        noise_levels = [0, 0.1, 0.3, 0.5]
+    
+    results['noise_levels'] = noise_levels
+    
+    # Для каждого уровня шума
+    for noise_level in noise_levels:
+        noise_key = f"noise_{int(noise_level*100)}"
+        results['accuracies'][noise_key] = []
+        
+        # Для каждого размера ансамбля
+        for size in range(1, max_ensemble_size + 1):
+            # Создаем и обучаем ансамбль
+            ensemble = EnsembleClassifier(dataset_name, base_params=base_params, num_models=size)
+            ensemble.build_ensemble(X_train, y_train, X_val, y_val)
+            
+            # Если нужно добавить шум
+            if noise_level > 0:
+                X_test_noisy = add_noise_to_features(X_test, noise_level, 'gaussian')
+                predictions, _ = ensemble.predict(X_test_noisy)
+            else:
+                predictions, _ = ensemble.predict(X_test)
+                
+            # Вычисляем точность
+            accuracy = accuracy_score(y_test, predictions)
+            
+            # Сохраняем результат
+            results['accuracies'][noise_key].append({
+                'size': size,
+                'accuracy': float(accuracy)
+            })
+            
+            logger.info(f"Ансамбль размера {size}, шум {noise_level*100}%: точность = {accuracy:.4f}")
+    
+    # Визуализируем результаты
+    try:
+        # Для случая без шума
+        plt.figure(figsize=(12, 8))
+        noise_key = "noise_0"
+        sizes = [item['size'] for item in results['accuracies'][noise_key]]
+        accuracies = [item['accuracy'] for item in results['accuracies'][noise_key]]
+        
+        plt.plot(sizes, accuracies, 'o-', linewidth=2)
+        
+        plt.title(f'Зависимость точности от размера ансамбля ({dataset_name})', fontsize=14)
+        plt.xlabel('Размер ансамбля', fontsize=12)
+        plt.ylabel('Точность', fontsize=12)
+        plt.grid(alpha=0.3)
+        plt.xticks(sizes)
+        
+        plt.savefig(RESULTS_DIR / f"ensemble_size_impact_{dataset_name}.png", dpi=300)
+        plt.close()
+        
+        # Для разных уровней шума
+        plt.figure(figsize=(12, 8))
+        
+        for noise_level in noise_levels:
+            noise_key = f"noise_{int(noise_level*100)}"
+            if noise_key in results['accuracies']:
+                sizes = [item['size'] for item in results['accuracies'][noise_key]]
+                accuracies = [item['accuracy'] for item in results['accuracies'][noise_key]]
+                
+                plt.plot(sizes, accuracies, 'o-', label=f'Шум {int(noise_level*100)}%')
+        
+        plt.title(f'Влияние размера ансамбля на устойчивость к шуму ({dataset_name})', fontsize=14)
+        plt.xlabel('Размер ансамбля', fontsize=12)
+        plt.ylabel('Точность', fontsize=12)
+        plt.grid(alpha=0.3)
+        plt.xticks(sizes)
+        plt.legend()
+        
+        plt.savefig(RESULTS_DIR / f"ensemble_size_noise_impact_{dataset_name}.png", dpi=300)
+        plt.close()
+    except Exception as e:
+        logger.warning(f"Ошибка при визуализации результатов: {str(e)}")
+    
+    # Сохраняем результаты в JSON
+    try:
+        with open(RESULTS_DIR / f"ensemble_size_analysis_{dataset_name}.json", 'w') as f:
+            json.dump(results, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Ошибка при сохранении результатов: {str(e)}")
+    
+    elapsed_time = time.time() - start_time
+    logger.info(f"=== Анализ размера ансамбля завершен. Время выполнения: {elapsed_time:.2f} секунд ===")
+    
+    return results
+
+def add_noise_to_features(X, noise_level, noise_type='gaussian'):
+    """Добавляет шум к признакам."""
+    if noise_level <= 0:
+        return X
+            
+    X_noisy = X.copy()
+    n_samples, n_features = X.shape
+    
+    # Количество примеров для добавления шума (согласно уровню шума)
+    n_noisy_samples = int(noise_level * n_samples)
+    noisy_indices = np.random.choice(n_samples, n_noisy_samples, replace=False)
+    
+    # Статистики признаков для реалистичного шума
+    feature_means = np.mean(X, axis=0)
+    feature_stds = np.std(X, axis=0)
+    feature_mins = np.min(X, axis=0)
+    feature_maxs = np.max(X, axis=0)
+    
+    # Для каждого зашумляемого примера
+    for idx in noisy_indices:
+        # Выбираем случайное количество признаков для зашумления
+        n_features_to_noise = np.random.randint(1, n_features + 1)
+        features_to_noise = np.random.choice(n_features, n_features_to_noise, replace=False)
+        
+        # Добавляем шум к выбранным признакам
+        for feature_idx in features_to_noise:
+            feature_range = feature_maxs[feature_idx] - feature_mins[feature_idx]
+            
+            if noise_type == 'gaussian':
+                # Гауссовский шум
+                noise = np.random.normal(0, feature_stds[feature_idx])
+                X_noisy[idx, feature_idx] += noise
+                
+            elif noise_type == 'uniform':
+                # Равномерный шум
+                noise = np.random.uniform(-0.5, 0.5) * feature_range
+                X_noisy[idx, feature_idx] += noise
+                
+            elif noise_type == 'impulse':
+                # Импульсный шум
+                impulse_type = np.random.choice(['min', 'max', 'extreme'])
+                if impulse_type == 'min':
+                    X_noisy[idx, feature_idx] = feature_mins[feature_idx]
+                elif impulse_type == 'max':
+                    X_noisy[idx, feature_idx] = feature_maxs[feature_idx]
+                else:
+                    extreme_factor = np.random.choice([-2, 2])
+                    X_noisy[idx, feature_idx] = feature_means[feature_idx] + extreme_factor * feature_stds[feature_idx]
+                    
+            elif noise_type == 'missing':
+                # Пропущенные значения
+                X_noisy[idx, feature_idx] = np.nan
+    
+    # Заполняем пропущенные значения
+    if noise_type == 'missing':
+        for j in range(n_features):
+            mask = np.isnan(X_noisy[:, j])
+            if np.any(mask):
+                X_noisy[mask, j] = np.mean(X_noisy[~mask, j])
+    
+    return X_noisy
+
+def analyze_superensemble_robustness(super_ensemble, X_test, y_test, dataset_name, 
+                                    noise_types=['gaussian', 'uniform', 'impulse'], 
+                                    noise_levels=[0, 0.1, 0.2, 0.3, 0.4, 0.5]):
+    """
+    Анализирует устойчивость суперансамбля к шуму по сравнению с компонентами.
+    
+    Args:
+        super_ensemble: Обученный SuperEnsemble
+        X_test: Тестовые данные
+        y_test: Истинные метки
+        dataset_name: Название датасета
+        noise_types: Типы шума для анализа
+        noise_levels: Уровни шума для анализа
+    """
+    # Выбираем несколько компонентов для сравнения
+    models_to_compare = {
+        "SuperEnsemble": super_ensemble
+    }
+    
+    # Добавляем несколько ключевых компонентов (первая НС, лучшая традиционная модель)
+    if len(super_ensemble.nn_ensemble.models) > 0:
+        models_to_compare["Best NN"] = super_ensemble.nn_ensemble.models[0]
+    
+    # Выбираем лучшую традиционную модель
+    if super_ensemble.additional_models:
+        best_traditional_model = None
+        best_accuracy = 0
+        
+        for name, model in super_ensemble.additional_models.items():
+            try:
+                if hasattr(model, 'predict_proba'):
+                    pred = model.predict_proba(X_test)[:, 1]
+                    pred_binary = (pred > 0.5).astype(int)
+                else:
+                    pred_binary = model.predict(X_test)
+                    # Убедимся, что предсказания бинарные
+                    if np.issubdtype(pred_binary.dtype, np.floating):
+                        pred_binary = (pred_binary > 0.5).astype(int)
+                acc = accuracy_score(y_test, pred_binary)
+                
+                if acc > best_accuracy:
+                    best_accuracy = acc
+                    best_traditional_model = (name, model)
+            except:
+                continue
+        
+        if best_traditional_model:
+            models_to_compare[best_traditional_model[0]] = best_traditional_model[1]
+    
+    # Результаты для каждого типа шума
+    results = {}
+    
+    # Для каждого типа шума
+    for noise_type in noise_types:
+        results[noise_type] = {}
+        
+        # Для каждой модели
+        for model_name, model in models_to_compare.items():
+            results[noise_type][model_name] = []
+            
+            # Для каждого уровня шума
+            for noise_level in noise_levels:
+                # Добавляем шум к тестовым данным
+                X_noisy = add_noise_to_features(X_test, noise_level, noise_type)
+                
+                # Делаем предсказания
+                if model_name == "SuperEnsemble":
+                    y_pred, y_prob = model.predict(X_noisy)
+                    # Убедимся, что предсказания бинарные
+                    if np.issubdtype(y_pred.dtype, np.floating):
+                        y_pred = (y_pred > 0.5).astype(int)
+                elif hasattr(model, 'predict_proba'):  # Для моделей с вероятностями
+                    y_prob = model.predict(X_noisy)
+                    y_pred = (y_prob > 0.5).astype(int).flatten()
+                else:  # Для остальных моделей
+                    y_pred = model.predict(X_noisy)
+                    # Убедимся, что предсказания бинарные
+                    if np.issubdtype(y_pred.dtype, np.floating):
+                        y_pred = (y_pred > 0.5).astype(int)
+                    if y_pred.ndim > 1:
+                        y_pred = y_pred.flatten()
+                
+                # Вычисляем точность
+                accuracy = accuracy_score(y_test, y_pred)
+                
+                results[noise_type][model_name].append({
+                    'level': noise_level,
+                    'accuracy': float(accuracy)
+                })
+                
+                logger.info(f"Шум '{noise_type}' уровня {noise_level}: {model_name} точность = {accuracy:.4f}")
+    
+    # Визуализация результатов
+    for noise_type in noise_types:
+        plt.figure(figsize=(10, 6))
+        
+        for model_name in models_to_compare.keys():
+            noise_data = results[noise_type][model_name]
+            levels = [data['level'] for data in noise_data]
+            accuracies = [data['accuracy'] for data in noise_data]
+            
+            line_style = '-' if model_name == "SuperEnsemble" else '--'
+            line_width = 2 if model_name == "SuperEnsemble" else 1
+            
+            plt.plot(levels, accuracies, marker='o', linestyle=line_style, 
+                     linewidth=line_width, label=model_name)
+        
+        plt.title(f'Устойчивость к шуму {noise_type.capitalize()} для {dataset_name}', fontsize=14)
+        plt.xlabel('Уровень шума', fontsize=12)
+        plt.ylabel('Точность', fontsize=12)
+        plt.ylim(0.5, 1.05)
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        
+        plt.tight_layout()
+        plt.savefig(RESULTS_DIR / f"superensemble_{noise_type}_robustness_{dataset_name}.png", dpi=300)
+        plt.close()
+    
+    # Комбинированная визуализация для финального сравнения
+    plt.figure(figsize=(15, 10))
+    
+    for i, noise_type in enumerate(noise_types):
+        plt.subplot(2, 2, i+1)
+        
+        for model_name in models_to_compare.keys():
+            noise_data = results[noise_type][model_name]
+            levels = [data['level'] for data in noise_data]
+            accuracies = [data['accuracy'] for data in noise_data]
+            
+            line_style = '-' if model_name == "SuperEnsemble" else '--'
+            line_width = 2 if model_name == "SuperEnsemble" else 1
+            
+            plt.plot(levels, accuracies, marker='o', linestyle=line_style, 
+                     linewidth=line_width, label=model_name)
+        
+        plt.title(f'Шум {noise_type.capitalize()}', fontsize=12)
+        plt.xlabel('Уровень шума', fontsize=10)
+        plt.ylabel('Точность', fontsize=10)
+        plt.ylim(0.5, 1.05)
+        plt.grid(True, alpha=0.3)
+        plt.legend(loc='lower left')
+    
+    plt.suptitle(f'Сравнение устойчивости к шуму для {dataset_name}', fontsize=16)
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.savefig(RESULTS_DIR / f"superensemble_comparative_robustness_{dataset_name}.png", dpi=300)
+    plt.close()
+    
+    # Сохраняем результаты
+    with open(RESULTS_DIR / f"superensemble_robustness_{dataset_name}.json", 'w') as f:
+        json.dump(results, f, indent=2)
+    
+    return results
+
+def run_heart_disease_classifier(run_hyperopt=True, n_trials=50, ensemble_size=5, 
+                              analyze_noise=True, run_comparative=True,
+                              min_noise=0.0, max_noise=0.5, noise_step=0.1,
+                              ensemble_type='standard'):
+    """
+    Запускает полный процесс оптимизации, обучения и анализа классификатора сердечных заболеваний.
+    
+    Args:
+        run_hyperopt: Выполнять ли оптимизацию гиперпараметров
+        n_trials: Количество попыток для оптимизации гиперпараметров
+        ensemble_size: Размер ансамбля моделей
+        analyze_noise: Выполнять ли анализ устойчивости к шуму
+        run_comparative: Выполнять ли сравнительный анализ с другими алгоритмами
+        min_noise: Минимальный уровень шума (0.0 - 1.0)
+        max_noise: Максимальный уровень шума (0.0 - 1.0)
+        noise_step: Шаг изменения уровня шума (0.0 - 1.0)
+        ensemble_type: Тип ансамбля ('standard', 'snapshot', 'stacked')
+        
+    Returns:
+        EnsembleClassifier: Обученный ансамбль моделей
+    """
+    dataset_name = "heart"
+    logger.info(f"=== Запуск классификатора сердечных заболеваний ===")
+    start_time = time.time()
+    
+    # Загрузка и подготовка данных
+    X_train, y_train, X_test, y_test = DataLoader.load_heart_disease_data()
+    logger.info(f"Загружены данные: {X_train.shape[1]} признаков")
+    
+    # Разделение на обучающую и валидационную выборки
+    X_train_subset, X_val, y_train_subset, y_val = train_test_split(
+        X_train, y_train, test_size=0.2, random_state=RANDOM_SEED, stratify=y_train
+    )
+    
+    # Оптимизация гиперпараметров или загрузка ранее найденных
+    if run_hyperopt:
+        logger.info("Запуск оптимизации гиперпараметров")
+        best_params = HyperOptimizer.optimize_hyperparameters(
+            X_train_subset, y_train_subset, X_val, y_val, 
+            dataset_name, n_trials=n_trials
+        )
+    else:
+        # Попытка загрузить ранее сохраненные результаты оптимизации
+        try:
+            result_path = RESULTS_DIR / f"hyperopt_results_{dataset_name}.pkl"
+            if result_path.exists():
+                with open(result_path, "rb") as f:
+                    study = pickle.load(f)
+                best_params = study.best_params
+                logger.info(f"Загружены ранее найденные гиперпараметры: {best_params}")
+            else:
+                logger.warning("Файл с результатами оптимизации не найден, используем значения по умолчанию")
+                # Значения по умолчанию для сердечных данных
+                best_params = {
+                    'n_layers': 3,
+                    'units_first': 64,
+                    'activation': 'relu',
+                    'use_batch_norm': True,
+                    'dropout_rate': 0.3,
+                    'use_residual': True,
+                    'learning_rate': 0.001,
+                    'batch_size': 32,
+                    'optimizer': 'adam',
+                    'use_regularization': True,
+                    'l1_factor': 1e-5,
+                    'l2_factor': 1e-4
+                }
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке гиперпараметров: {str(e)}")
+            # Используем значения по умолчанию
+            best_params = {
+                'n_layers': 3,
+                'units_first': 64,
+                'activation': 'relu',
+                'use_batch_norm': True,
+                'dropout_rate': 0.3,
+                'use_residual': True,
+                'learning_rate': 0.001,
+                'batch_size': 32,
+                'optimizer': 'adam',
+                'use_regularization': True,
+                'l1_factor': 1e-5,
+                'l2_factor': 1e-4
+            }
+    
+    # Построение и обучение ансамбля моделей в зависимости от выбранного типа
+    logger.info(f"Создание ансамбля из {ensemble_size} моделей, тип: {ensemble_type}")
+    ensemble = EnsembleClassifier(dataset_name, base_params=best_params, num_models=ensemble_size)
+    
+    # Обучение ансамбля в зависимости от выбранного типа
+    if ensemble_type == 'standard':
+        ensemble.build_ensemble(X_train, y_train, X_val, y_val)
+    elif ensemble_type == 'stacked':
+        # Используем существующий метод build_stacked_ensemble
+        ensemble.build_stacked_ensemble(X_train, y_train, X_val, y_val, 
+                                     initial_ensemble_size=min(ensemble_size * 2, 20),
+                                     final_ensemble_size=ensemble_size)
+    elif ensemble_type == 'snapshot':
+        # Предполагается, что метод build_snapshot_ensemble определен в EnsembleClassifier
+        ensemble.build_snapshot_ensemble(X_train, y_train, X_val, y_val, n_snapshots=ensemble_size)
+    
+    # Оценка на тестовой выборке
+    logger.info("Оценка ансамбля на тестовой выборке")
+    results = ensemble.evaluate(X_test, y_test)
+    
+    # Визуализация результатов
+    plt.figure(figsize=(12, 10))
+    
+    # Матрица ошибок
+    plt.subplot(2, 2, 1)
+    cm = results['confusion_matrix']
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
+    plt.title("Матрица ошибок")
+    plt.ylabel("Истинный класс")
+    plt.xlabel("Предсказанный класс")
+    
+    # ROC-кривая (если применимо)
+    if not np.isnan(results.get('roc_auc', np.nan)) and results.get('fpr') is not None and results.get('tpr') is not None:
+        plt.subplot(2, 2, 2)
+        plt.plot(results['fpr'], results['tpr'], label=f'ROC curve (AUC = {results["roc_auc"]:.3f})')
+        plt.plot([0, 1], [0, 1], 'k--')
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title('ROC Curve')
+        plt.legend(loc="lower right")
+    
+    # Добавим информацию о метриках классификации
+    plt.subplot(2, 2, 3)
+    report_text = ""
+    if 'classification_report' in results:
+        report = results['classification_report']
+        for class_name, metrics in report.items():
+            if class_name in ['0', '1'] or class_name in [0, 1]:
+                report_text += f"Класс {class_name}:\n"
+                report_text += f"   Precision: {metrics['precision']:.4f}\n"
+                report_text += f"   Recall: {metrics['recall']:.4f}\n"
+                report_text += f"   F1-score: {metrics['f1-score']:.4f}\n"
+                report_text += f"   Support: {metrics['support']}\n\n"
+        report_text += f"Точность: {results['accuracy']:.4f}\n"
+        if 'roc_auc' in results and not np.isnan(results['roc_auc']):
+            report_text += f"ROC AUC: {results['roc_auc']:.4f}\n"
+    
+    plt.text(0.1, 0.5, report_text, fontsize=10, va='center')
+    plt.axis('off')
+    plt.title('Метрики классификации')
+    
+    # Сохраняем визуализацию
+    plt.tight_layout()
+    plt.savefig(RESULTS_DIR / f"results_{dataset_name}.png", dpi=300)
+    plt.close()
+    
+    # Сохраняем ансамбль моделей
+    ensemble.save()
+    
+    # Сравнительный анализ с другими алгоритмами
+    if run_comparative:
+        logger.info("Сравнительный анализ с другими алгоритмами")
+        comparative = ComparativeAnalyzer(ensemble, dataset_name)
+        comparative.train_baseline_models(X_train, y_train)
+        
+        # Создаем массив уровней шума на основе параметров
+        noise_levels = np.arange(min_noise, max_noise + noise_step/2, noise_step).tolist()
+        
+        # Проводим сравнительный анализ
+        comparative_results = comparative.analyze_noise_resistance(
+            X_test, y_test,
+            noise_types=['gaussian', 'uniform', 'impulse', 'missing'],
+            noise_levels=noise_levels,
+            n_experiments=3
+        )
+    
+    # Анализ устойчивости к шуму отдельной модели
+    if analyze_noise and not run_comparative:
+        logger.info("Анализ устойчивости к шуму")
+        
+        # Создаем класс для анализа шума
+        class NoiseAnalyzer:
+            @staticmethod
+            def add_noise(X, noise_level, noise_type='gaussian'):
+                logger.info(f"Добавление {noise_type} шума с уровнем {noise_level:.2f}")
+                
+                if noise_level <= 0:
+                    return X
+                    
+                X_noisy = X.copy()
+                n_samples, n_features = X.shape
+                
+                # Количество примеров для добавления шума (согласно уровню шума)
+                n_noisy_samples = int(noise_level * n_samples)
+                noisy_indices = np.random.choice(n_samples, n_noisy_samples, replace=False)
+                
+                # Статистики признаков для реалистичного шума
+                feature_means = np.mean(X, axis=0)
+                feature_stds = np.std(X, axis=0)
+                feature_mins = np.min(X, axis=0)
+                feature_maxs = np.max(X, axis=0)
+                
+                # Для каждого зашумляемого примера
+                for idx in noisy_indices:
+                    # Выбираем случайное количество признаков для зашумления
+                    n_features_to_noise = np.random.randint(1, n_features + 1)
+                    features_to_noise = np.random.choice(n_features, n_features_to_noise, replace=False)
+                    
+                    # Добавляем шум к выбранным признакам
+                    for feature_idx in features_to_noise:
+                        feature_range = feature_maxs[feature_idx] - feature_mins[feature_idx]
+                        
+                        if noise_type == 'gaussian':
+                            # Гауссовский шум, масштабируемый к стандартному отклонению признака
+                            noise = np.random.normal(0, feature_stds[feature_idx])
+                            X_noisy[idx, feature_idx] += noise
+                            
+                        elif noise_type == 'uniform':
+                            # Равномерный шум в пределах диапазона признака
+                            noise = np.random.uniform(-0.5, 0.5) * feature_range
+                            X_noisy[idx, feature_idx] += noise
+                            
+                        elif noise_type == 'impulse':
+                            # Импульсный шум - замена на экстремальные значения
+                            impulse_type = np.random.choice(['min', 'max', 'extreme'])
+                            if impulse_type == 'min':
+                                X_noisy[idx, feature_idx] = feature_mins[feature_idx]
+                            elif impulse_type == 'max':
+                                X_noisy[idx, feature_idx] = feature_maxs[feature_idx]
+                            else:  # extreme
+                                extreme_factor = np.random.choice([-2, 2])
+                                X_noisy[idx, feature_idx] = feature_means[feature_idx] + extreme_factor * feature_stds[feature_idx]
+                                
+                        elif noise_type == 'missing':
+                            # Замена на NaN (требует предобработки перед использованием)
+                            X_noisy[idx, feature_idx] = np.nan
+                
+                # Если есть пропущенные значения, заполняем их средними (импутация)
+                if noise_type == 'missing':
+                    for j in range(n_features):
+                        mask = np.isnan(X_noisy[:, j])
+                        X_noisy[mask, j] = np.mean(X_noisy[~mask, j])
+                
+                return X_noisy
+            
+            @staticmethod
+            def analyze_noise_resistance(ensemble, X, y, noise_types=None, noise_levels=None, n_experiments=5):
+                if noise_types is None:
+                    noise_types = ['gaussian', 'uniform', 'impulse']
+                    
+                if noise_levels is None:
+                    noise_levels = np.arange(min_noise, max_noise + noise_step/2, noise_step).tolist()
+                    
+                logger.info(f"Анализ устойчивости к шуму: {len(noise_types)} типов, {len(noise_levels)} уровней, {n_experiments} экспериментов")
+                
+                # Получаем базовую точность (без шума)
+                baseline_preds, _ = ensemble.predict(X)
+                baseline_accuracy = accuracy_score(y, baseline_preds)
+                logger.info(f"Базовая точность (без шума): {baseline_accuracy:.4f}")
+                
+                # Структура для хранения результатов
+                results = {
+                    'noise_types': noise_types,
+                    'noise_levels': noise_levels,
+                    'baseline_accuracy': baseline_accuracy,
+                    'accuracies': {}
+                }
+                
+                # Для каждого типа шума
+                for noise_type in noise_types:
+                    results['accuracies'][noise_type] = []
+                    
+                    # Для каждого уровня шума
+                    for noise_level in noise_levels:
+                        level_accuracies = []
+                        
+                        # Повторяем эксперимент несколько раз
+                        for exp in range(n_experiments):
+                            # Добавляем шум
+                            X_noisy = NoiseAnalyzer.add_noise(X, noise_level, noise_type)
+                            
+                            # Делаем предсказание
+                            preds, _ = ensemble.predict(X_noisy)
+                            
+                            # Вычисляем точность
+                            accuracy = accuracy_score(y, preds)
+                            level_accuracies.append(accuracy)
+                        
+                        # Сохраняем средний результат
+                        mean_accuracy = np.mean(level_accuracies)
+                        std_accuracy = np.std(level_accuracies)
+                        
+                        results['accuracies'][noise_type].append({
+                            'level': float(noise_level),
+                            'mean_accuracy': float(mean_accuracy),
+                            'std_accuracy': float(std_accuracy),
+                            'experiments': [float(acc) for acc in level_accuracies]
+                        })
+                        
+                        logger.info(f"Шум '{noise_type}' уровня {noise_level:.1f}: точность = {mean_accuracy:.4f} (±{std_accuracy:.4f})")
+                
+                # Визуализация результатов
+                NoiseAnalyzer.visualize_noise_resistance(results, ensemble.dataset_name)
+                
+                # Сохраняем результаты
+                with open(RESULTS_DIR / f"noise_analysis_{ensemble.dataset_name}.json", 'w') as f:
+                    json.dump(results, f, indent=2)
+                    
+                return results
+            
+            @staticmethod
+            def visualize_noise_resistance(results, dataset_name):
+                fig, ax = plt.subplots(figsize=(12, 8))
+                
+                # Строим график для каждого типа шума
+                for noise_type in results['noise_types']:
+                    noise_data = results['accuracies'][noise_type]
+                    levels = [data['level'] for data in noise_data]
+                    accuracies = [data['mean_accuracy'] for data in noise_data]
+                    errors = [data['std_accuracy'] for data in noise_data]
+                    
+                    ax.errorbar(
+                        levels, 
+                        accuracies, 
+                        yerr=errors, 
+                        marker='o', 
+                        linestyle='-', 
+                        capsize=5, 
+                        label=f'{noise_type.capitalize()} Noise'
+                    )
+                
+                # Добавляем базовую линию (без шума)
+                ax.axhline(
+                    y=results['baseline_accuracy'], 
+                    color='black', 
+                    linestyle='--', 
+                    label=f'Baseline (No Noise): {results["baseline_accuracy"]:.4f}'
+                )
+                
+                # Настраиваем график
+                ax.set_title(f'Устойчивость к шуму для {dataset_name}', fontsize=16)
+                ax.set_xlabel('Уровень шума', fontsize=14)
+                ax.set_ylabel('Точность', fontsize=14)
+                ax.set_ylim(0, 1.05)
+                ax.set_xlim(-0.02, max(results['noise_levels']) + 0.02)
+                ax.grid(True, alpha=0.3)
+                ax.legend(fontsize=12)
+                
+                # Сохраняем график
+                plt.tight_layout()
+                plt.savefig(RESULTS_DIR / f"noise_resistance_{dataset_name}.png", dpi=300)
+                plt.close()
+        
+        # Создаем массив уровней шума на основе параметров
+        noise_levels = np.arange(min_noise, max_noise + noise_step/2, noise_step).tolist()
+
+        # Анализируем устойчивость к шуму
+        noise_analysis = NoiseAnalyzer.analyze_noise_resistance(
+            ensemble, X_test, y_test,
+            noise_types=['gaussian', 'uniform', 'impulse', 'missing'],
+            noise_levels=[0, 0.1, 0.2, 0.3, 0.4, 0.5],
+            n_experiments=3
+        )
+    
+    # Выводим сводную информацию
+    elapsed_time = time.time() - start_time
+    logger.info(f"=== Результаты для {dataset_name} ===")
+    logger.info(f"Точность: {results['accuracy']:.4f}")
+    logger.info(f"ROC AUC: {results.get('roc_auc', 'N/A')}")
+    
+    # Получаем детальную информацию из отчета
+    if 'classification_report' in results:
+        for cls, metrics in results['classification_report'].items():
+            if cls in ['0', '1']:
+                logger.info(f"Класс {cls}: precision={metrics['precision']:.4f}, recall={metrics['recall']:.4f}, f1-score={metrics['f1-score']:.4f}")
+    
+    logger.info(f"Время выполнения: {elapsed_time:.2f} секунд")
+    
+    return ensemble
+
+def run_super_ensemble_heart(run_hyperopt=False, n_trials=50, nn_ensemble_size=5,
+                          analyze_noise=True, run_comparative=True,
+                          min_noise=0.0, max_noise=0.5, noise_step=0.1):
+    """
+    Запускает расширенный суперансамбль для задачи классификации сердечных заболеваний.
+    
+    Args:
+        run_hyperopt: Выполнять ли оптимизацию гиперпараметров
+        n_trials: Количество попыток для оптимизации гиперпараметров
+        nn_ensemble_size: Размер ансамбля нейронных сетей
+        analyze_noise: Выполнять ли анализ устойчивости к шуму
+        run_comparative: Выполнять ли сравнительный анализ с другими алгоритмами
+        min_noise: Минимальный уровень шума (0.0 - 1.0)
+        max_noise: Максимальный уровень шума (0.0 - 1.0)
+        noise_step: Шаг изменения уровня шума (0.0 - 1.0)
+        
+    Returns:
+        SuperEnsemble: Обученный суперансамбль
+    """
+    dataset_name = "heart"
+    logger.info(f"=== Запуск SuperEnsemble для {dataset_name} ===")
+    start_time = time.time()
+    
+    # Загрузка и подготовка данных
+    X_train, y_train, X_test, y_test = DataLoader.load_heart_disease_data()
+    logger.info(f"Загружены данные: {X_train.shape[1]} признаков")
+    
+    # Разделение на обучающую и валидационную выборки
+    X_train_subset, X_val, y_train_subset, y_val = train_test_split(
+        X_train, y_train, test_size=0.2, random_state=RANDOM_SEED, stratify=y_train
+    )
+    
+    # Оптимизация гиперпараметров или загрузка ранее найденных
+    if run_hyperopt:
+        logger.info("Запуск оптимизации гиперпараметров")
+        best_params = HyperOptimizer.optimize_hyperparameters(
+            X_train_subset, y_train_subset, X_val, y_val, 
+            dataset_name, n_trials=n_trials
+        )
+    else:
+        # Попытка загрузить ранее сохраненные результаты оптимизации
+        try:
+            result_path = RESULTS_DIR / f"hyperopt_results_{dataset_name}.pkl"
+            if result_path.exists():
+                with open(result_path, "rb") as f:
+                    study = pickle.load(f)
+                best_params = study.best_params
+                logger.info(f"Загружены ранее найденные гиперпараметры: {best_params}")
+            else:
+                logger.warning("Файл с результатами оптимизации не найден, используем значения по умолчанию")
+                # Значения по умолчанию
+                best_params = {
+                    'n_layers': 3,
+                    'units_first': 64,
+                    'activation': 'relu',
+                    'use_batch_norm': True,
+                    'dropout_rate': 0.3,
+                    'use_residual': True,
+                    'learning_rate': 0.001,
+                    'batch_size': 32,
+                    'optimizer': 'adam',
+                    'use_regularization': True,
+                    'l1_factor': 1e-5,
+                    'l2_factor': 1e-4
+                }
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке гиперпараметров: {str(e)}")
+            best_params = {
+                'n_layers': 3,
+                'units_first': 64,
+                'activation': 'relu',
+                'use_batch_norm': True,
+                'dropout_rate': 0.3,
+                'use_residual': True,
+                'learning_rate': 0.001,
+                'batch_size': 32,
+                'optimizer': 'adam',
+                'use_regularization': True,
+                'l1_factor': 1e-5,
+                'l2_factor': 1e-4
+            }
+    
+    # Создание и обучение SuperEnsemble
+    super_ensemble = SuperEnsemble(
+        dataset_name=dataset_name,
+        base_params=best_params,
+        nn_ensemble_size=nn_ensemble_size
+    )
+    
+    # Обучаем на всей обучающей выборке
+    super_ensemble.fit(X_train, y_train, X_val, y_val)
+    
+    # Оценка на тестовой выборке
+    logger.info("Оценка SuperEnsemble на тестовой выборке")
+    results = super_ensemble.evaluate(X_test, y_test)
+    
+    # Визуализация результатов суперансамбля
+    plt.figure(figsize=(20, 15))
+
+    # 1. Матрица ошибок (верхний левый угол)
+    plt.subplot(2, 3, 1)
+    cm = results['confusion_matrix']
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
+    plt.title("Матрица ошибок SuperEnsemble", fontsize=14)
+    plt.ylabel("Истинный класс", fontsize=12)
+    plt.xlabel("Предсказанный класс", fontsize=12)
+
+    # 2. ROC-кривая (верхний средний)
+    if not np.isnan(results.get('roc_auc', np.nan)) and results.get('fpr') is not None and results.get('tpr') is not None:
+        plt.subplot(2, 3, 2)
+        plt.plot(results['fpr'], results['tpr'], 'b-', 
+                label=f'SuperEnsemble ROC (AUC = {results["roc_auc"]:.3f})')
+        plt.plot([0, 1], [0, 1], 'k--')
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('False Positive Rate', fontsize=12)
+        plt.ylabel('True Positive Rate', fontsize=12)
+        plt.title('ROC Curve SuperEnsemble', fontsize=14)
+        plt.legend(loc="lower right")
+
+    # 3. Важность компонентов ансамбля (верхний правый)
+    plt.subplot(2, 3, 3)
+    model_weights = []
+    model_names = []
+
+    # Собираем веса моделей если доступны
+    if hasattr(super_ensemble, 'optimal_weights') and super_ensemble.optimal_weights is not None:
+        weights = super_ensemble.optimal_weights
+        
+        # Получаем имена и веса всех компонентов
+        nn_count = len(super_ensemble.nn_ensemble.models)
+        for i in range(nn_count):
+            model_names.append(f"NN_{i+1}")
+            model_weights.append(weights[i] if i < len(weights) else 0)
+        
+        # Добавляем другие модели
+        other_idx = nn_count
+        for name in super_ensemble.additional_models.keys():
+            if other_idx < len(weights):
+                model_names.append(name)
+                model_weights.append(weights[other_idx])
+                other_idx += 1
+
+        # Сортируем по важности
+        sorted_idx = np.argsort(model_weights)
+        sorted_names = [model_names[i] for i in sorted_idx[-10:]]  # Берем топ-10
+        sorted_weights = [model_weights[i] for i in sorted_idx[-10:]]
+        
+        # Визуализируем
+        bars = plt.barh(sorted_names, sorted_weights, color='skyblue')
+        plt.title('Важность компонентов ансамбля', fontsize=14)
+        plt.xlabel('Относительная важность', fontsize=12)
+        plt.gca().invert_yaxis()  # Наибольшая важность сверху
+
+    # 4. Детализированный отчет (нижний левый)
+    plt.subplot(2, 3, 4)
+    report_str = "Детальный отчет по классам:\n\n"
+    for cls, metrics in results['classification_report'].items():
+        if cls in ['0', '1', 0, 1]:
+            report_str += f"Класс {cls}:\n"
+            report_str += f"  Precision: {metrics['precision']:.4f}\n"
+            report_str += f"  Recall: {metrics['recall']:.4f}\n"
+            report_str += f"  F1-Score: {metrics['f1-score']:.4f}\n"
+            report_str += f"  Support: {metrics['support']}\n\n"
+    report_str += f"Accuracy: {results['accuracy']:.4f}\n"
+    report_str += f"Macro Avg F1: {results['classification_report']['macro avg']['f1-score']:.4f}\n"
+    report_str += f"Weighted Avg F1: {results['classification_report']['weighted avg']['f1-score']:.4f}\n"
+    plt.text(0.1, 0.1, report_str, fontsize=12, va='top', ha='left')
+    plt.axis('off')
+
+    # 5. Сравнение компонентов по точности (нижний средний)
+    plt.subplot(2, 3, 5)
+    # Здесь добавим сравнение компонентов по точности
+    # Сначала нужно вычислить точность каждого компонента на тестовых данных
+    component_accuracies = []
+    component_names = []
+
+    # Оцениваем каждую нейронную сеть
+    for i, nn_model in enumerate(super_ensemble.nn_ensemble.models):
+        pred = nn_model.predict(X_test)
+        pred_binary = (pred > 0.5).astype(int).flatten()
+        acc = accuracy_score(y_test, pred_binary)
+        component_accuracies.append(acc)
+        component_names.append(f"NN_{i+1}")
+
+    # Оцениваем другие модели
+    for name, model in super_ensemble.additional_models.items():
+        try:
+            if hasattr(model, 'predict_proba'):
+                pred = model.predict_proba(X_test)[:, 1]
+                pred_binary = (pred > 0.5).astype(int)
+            else:
+                pred_binary = model.predict(X_test)
+            acc = accuracy_score(y_test, pred_binary)
+            component_accuracies.append(acc)
+            component_names.append(name)
+        except Exception as e:
+            print(f"Ошибка при оценке модели {name}: {str(e)}")
+
+    # Добавляем точность самого суперансамбля
+    component_accuracies.append(results['accuracy'])
+    component_names.append("SuperEnsemble")
+
+    # Сортируем по точности
+    sorted_idx = np.argsort(component_accuracies)
+    sorted_names = [component_names[i] for i in sorted_idx[-10:]]  # Берем топ-10
+    sorted_accuracies = [component_accuracies[i] for i in sorted_idx[-10:]]
+
+    # Визуализируем
+    bars = plt.barh(sorted_names, sorted_accuracies, color='lightgreen')
+    plt.title('Точность компонентов', fontsize=14)
+    plt.xlabel('Точность', fontsize=12)
+    plt.xlim([0.5, 1.0])  # Ограничиваем диапазон для лучшей видимости
+    plt.gca().invert_yaxis()  # Наибольшая точность сверху
+
+    # 6. Дополнительная информация (нижний правый)
+    plt.subplot(2, 3, 6)
+    info_str = "Информация о SuperEnsemble:\n\n"
+    info_str += f"Число нейронных сетей: {super_ensemble.nn_ensemble_size}\n"
+    info_str += f"Число дополнительных моделей: {len(super_ensemble.additional_models)}\n"
+    info_str += f"Общее число компонентов: {len(super_ensemble.nn_ensemble.models) + len(super_ensemble.additional_models)}\n\n"
+    info_str += "Дополнительные модели:\n"
+    for name in super_ensemble.additional_models.keys():
+        info_str += f"  - {name}\n"
+
+    if hasattr(super_ensemble, 'meta_model') and super_ensemble.meta_model is not None:
+        info_str += "\nИспользуется мета-модель для стекинга"
+    elif hasattr(super_ensemble, 'optimal_weights') and super_ensemble.optimal_weights is not None:
+        info_str += "\nИспользуется оптимизированное взвешенное голосование"
+    else:
+        info_str += "\nИспользуется простое голосование"
+
+    plt.text(0.1, 0.1, info_str, fontsize=12, va='top', ha='left')
+    plt.axis('off')
+
+    # Сохраняем полную визуализацию
+    plt.tight_layout()
+    plt.savefig(RESULTS_DIR / f"superensemble_metrics_{dataset_name}.png", dpi=300)
+    plt.close()
+    
+    # Анализ устойчивости суперансамбля к шуму
+    if analyze_noise:
+        robustness_results = analyze_superensemble_robustness(
+            super_ensemble, X_test, y_test, dataset_name,
+            noise_types=['gaussian', 'uniform', 'impulse', 'missing'],
+            noise_levels=[0, 0.1, 0.2, 0.3, 0.4, 0.5]
+        )
+
+        # Сохраняем результаты анализа устойчивости
+        with open(RESULTS_DIR / f"superensemble_robustness_{dataset_name}.json", 'w') as f:
+            json.dump(robustness_results, f, indent=2)
+
+    # Сравнительный анализ с другими алгоритмами
+    if run_comparative:
+        logger.info("Сравнительный анализ суперансамбля с другими алгоритмами")
+        comparative = ComparativeAnalyzer(super_ensemble, dataset_name)
+        comparative.train_baseline_models(X_train, y_train)
+        
+        # Создаем массив уровней шума на основе параметров
+        noise_levels = np.arange(min_noise, max_noise + noise_step/2, noise_step).tolist()
+        
+        # Проводим сравнительный анализ
+        comparative_results = comparative.analyze_noise_resistance(
+            X_test, y_test,
+            noise_types=['gaussian', 'uniform', 'impulse', 'missing'],
+            noise_levels=noise_levels,
+            n_experiments=3
+        )
+    
+    # Выводим сводную информацию
+    elapsed_time = time.time() - start_time
+    logger.info(f"=== Результаты SuperEnsemble для {dataset_name} ===")
+    logger.info(f"Точность: {results['accuracy']:.4f}")
+    logger.info(f"ROC AUC: {results.get('roc_auc', 'N/A')}")
+    
+    # Получаем детальную информацию из отчета
+    if 'classification_report' in results:
+        for cls, metrics in results['classification_report'].items():
+            if cls in ['0', '1']:
+                logger.info(f"Класс {cls}: precision={metrics['precision']:.4f}, recall={metrics['recall']:.4f}, f1-score={metrics['f1-score']:.4f}")
+    
+    logger.info(f"Время выполнения: {elapsed_time:.2f} секунд")
+    
+    return super_ensemble
+
+if __name__ == "__main__":
+    print("=== Классификатор заболеваний сердца с использованием ансамбля нейронных сетей ===")
+    
+    # Запрос параметров запуска
+    run_hyperopt = input("Выполнить оптимизацию гиперпараметров? (y/n, по умолчанию: n): ").lower() == 'y'
+    
+    if run_hyperopt:
+        while True:
+            try:
+                n_trials = int(input("Количество попыток для оптимизации (по умолчанию: 50): ") or "50")
+                if n_trials > 0:
+                    break
+                else:
+                    print("Пожалуйста, введите положительное число.")
+            except ValueError:
+                print("Пожалуйста, введите целое число.")
+    else:
+        n_trials = 50
+    
+    while True:
+        try:
+            ensemble_size = int(input("Размер ансамбля моделей (по умолчанию: 5): ") or "5")
+            if ensemble_size > 0:
+                break
+            else:
+                print("Пожалуйста, введите положительное число.")
+        except ValueError:
+            print("Пожалуйста, введите целое число.")
+    
+    # Опция выбора типа анализа (только шум или сравнительный)
+    analyze_option = input("Выберите тип анализа:\n1. Только анализ шума\n2. Сравнительный анализ с другими алгоритмами\nВыбор (1/2, по умолчанию: 2): ") or "2"
+    analyze_noise = analyze_option == "1"
+    run_comparative = analyze_option == "2"
+    
+    # Если выбран анализ шума, запрашиваем параметры шума
+    min_noise = 0.0
+    max_noise = 0.5
+    noise_step = 0.1
+    
+    if analyze_noise or run_comparative:
+        print("\n=== Настройка параметров шума ===")
+        while True:
+            try:
+                min_noise = float(input("Минимальный уровень шума в % (по умолчанию: 0): ") or "0") / 100
+                if 0 <= min_noise <= 1:
+                    break
+                else:
+                    print("Пожалуйста, введите значение от 0 до 100.")
+            except ValueError:
+                print("Пожалуйста, введите число.")
+                
+        while True:
+            try:
+                max_noise = float(input("Максимальный уровень шума в % (по умолчанию: 50): ") or "50") / 100
+                if min_noise <= max_noise <= 1:
+                    break
+                else:
+                    print(f"Пожалуйста, введите значение от {min_noise*100} до 100.")
+            except ValueError:
+                print("Пожалуйста, введите число.")
+                
+        while True:
+            try:
+                noise_step = float(input("Шаг изменения уровня шума в % (по умолчанию: 10): ") or "10") / 100
+                if 0 < noise_step <= (max_noise - min_noise + 0.0001):
+                    break
+                else:
+                    print(f"Пожалуйста, введите положительное значение, не превышающее {(max_noise - min_noise) * 100:.1f}%.")
+            except ValueError:
+                print("Пожалуйста, введите число.")
+        
+        # Показываем пользователю рассчитанные уровни шума
+        noise_levels = np.arange(min_noise, max_noise + noise_step/2, noise_step)
+        print(f"\nБудут рассчитаны следующие уровни шума: {[f'{level*100:.1f}%' for level in noise_levels]}")
+    
+    # Выбор типа ансамбля
+    ensemble_type = input("\nВыберите тип ансамбля:\n1. Базовый ансамбль\n2. SuperEnsemble (с дополнительными алгоритмами)\nВыбор (1/2, по умолчанию: 1): ") or "1"
+    
+    # Если выбран базовый ансамбль, запрашиваем тип построения
+    if ensemble_type == "1":
+        build_type = input("\nВыберите метод построения ансамбля:\n1. Стандартный\n2. Стекинг (с отбором моделей)\n3. Снапшоты (разные этапы обучения)\nВыбор (1/2/3, по умолчанию: 1): ") or "1"
+        if build_type == "1":
+            ensemble_build_type = "standard"
+        elif build_type == "2":
+            ensemble_build_type = "stacked"
+        else:
+            ensemble_build_type = "snapshot"
+    
+    # Запуск выбранного типа ансамбля
+    try:
+        if ensemble_type == "1":
+            # Базовый ансамбль
+            print(f"\nЗапуск ансамбля нейронных сетей для классификации заболеваний сердца...")
+            ensemble = run_heart_disease_classifier(
+                run_hyperopt=run_hyperopt, 
+                n_trials=n_trials, 
+                ensemble_size=ensemble_size,
+                analyze_noise=analyze_noise,
+                run_comparative=run_comparative,
+                min_noise=min_noise,
+                max_noise=max_noise,
+                noise_step=noise_step,
+                ensemble_type=ensemble_build_type
+            )
+        else:
+            # SuperEnsemble
+            print(f"\nЗапуск SuperEnsemble для классификации заболеваний сердца...")
+            super_ensemble = run_super_ensemble_heart(
+                run_hyperopt=run_hyperopt,
+                n_trials=n_trials,
+                nn_ensemble_size=ensemble_size,
+                analyze_noise=analyze_noise,
+                run_comparative=run_comparative,
+                min_noise=min_noise,
+                max_noise=max_noise,
+                noise_step=noise_step
+            )
+            
+        print("\n=== Обучение и оценка завершены ===")
+        print(f"Результаты сохранены в директории: {RESULTS_DIR}")
+            
+    except Exception as e:
+        print(f"\nОшибка: {str(e)}")
+        logger.exception("Необработанное исключение в основной программе")
+        raise   
