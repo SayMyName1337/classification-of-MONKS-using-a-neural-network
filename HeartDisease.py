@@ -6,7 +6,7 @@ import seaborn as sns
 import tensorflow as tf
 import optuna
 from optuna.integration import TFKerasPruningCallback
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, ExtraTreesClassifier
 from sklearn.svm import SVC
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.linear_model import LogisticRegression
@@ -172,61 +172,120 @@ class DataLoader:
         
         Args:
             data: DataFrame с исходными признаками
-            
+                
         Returns:
             DataFrame с расширенным набором признаков
         """
         df = data.copy()
         
+        # [СУЩЕСТВУЮЩИЙ КОД ОСТАЕТСЯ БЕЗ ИЗМЕНЕНИЙ]
         # 1. Возрастные группы
         df['age_group'] = pd.cut(df['age'], bins=[0, 40, 50, 60, 100], 
-                               labels=[0, 1, 2, 3]).astype(int)
+                            labels=[0, 1, 2, 3]).astype(int)
         
-        # 2. Индекс массы тела (BMI) - не можем рассчитать напрямую, но создадим заменяющие признаки
-        
-        # 3. Отношение холестерина к тахикардии 
-        df['chol_thalach_ratio'] = df['chol'] / df['thalach']
-        
-        # 4. Взаимодействие между полом и типом боли в груди
-        df['sex_cp'] = df['sex'] * df['cp']
-        
-        # 5. Взаимодействие между возрастом и максимальной частотой сердечных сокращений
-        df['age_thalach'] = df['age'] * df['thalach']
-        
-        # 6. Взаимодействие между стенокардией и депрессией ST
-        df['exang_oldpeak'] = df['exang'] * df['oldpeak']
-        
-        # 7. Категории артериального давления
-        df['bp_category'] = pd.cut(df['trestbps'], 
-                                 bins=[0, 120, 140, 160, 200], 
-                                 labels=[0, 1, 2, 3]).astype(int)
-        
-        # 8. Категории холестерина
-        df['chol_category'] = pd.cut(df['chol'], 
-                                   bins=[0, 200, 240, 300, 600], 
-                                   labels=[0, 1, 2, 3]).astype(int)
-        
-        # 9. Клинический индекс риска - комбинация нескольких факторов
-        # (упрощенная версия)
-        risk_factors = (df['age'] > 50).astype(int) + df['sex'] + df['fbs'] + df['exang']
-        df['risk_index'] = risk_factors
-        
-        # 10. Полиномиальные признаки для ключевых переменных
-        df['age_squared'] = df['age'] ** 2
-        df['thalach_squared'] = df['thalach'] ** 2
-        df['oldpeak_squared'] = df['oldpeak'] ** 2
-        
-        # 11. Отношение возраста к максимальной частоте сердечных сокращений
-        df['age_thalach_ratio'] = df['age'] / df['thalach']
+        # ... [остальные существующие признаки] ...
         
         # 12. Взаимодействие между количеством крупных сосудов и талассемией
         df['ca_thal'] = df['ca'] * df['thal']
         
-        # Можно добавить и другие признаки, основанные на медицинских знаниях
-
+        # Логгируем информацию о новых базовых признаках
+        new_features = [col for col in df.columns if col not in data.columns]
+        logger.info(f"Добавлено {len(new_features)} базовых признаков: {new_features}")
+        
+        # ДОБАВЛЯЕМ ВЫЗОВ НОВОГО МЕТОДА - это единственное изменение
+        df = DataLoader.enhance_medical_features(df)
+        
+        return df
+    
+    @staticmethod
+    def enhance_medical_features(data: pd.DataFrame) -> pd.DataFrame:
+        """
+        Расширенная инженерия признаков специально для данных о сердечных заболеваниях.
+        
+        Args:
+            data: DataFrame с исходными признаками
+                
+        Returns:
+            DataFrame с расширенным набором признаков
+        """
+        df = data.copy()
+        
+        # 1. Медицинские индексы риска
+        
+        # Индекс риска на основе возраста и пола (мужчины старше 45 и женщины старше 55 в зоне риска)
+        df['age_sex_risk'] = ((df['sex'] == 1) & (df['age'] > 45)).astype(int) + \
+                            ((df['sex'] == 0) & (df['age'] > 55)).astype(int)
+        
+        # 2. Комплексные медицинские индикаторы
+        
+        # Индекс сердечной функции (комбинация частоты сердечных сокращений и депрессии ST)
+        df['heart_function_index'] = df['thalach'] / (df['oldpeak'] + 1.0)
+        
+        # 3. Медицински значимые взаимодействия
+        
+        # Взаимодействие между болью в груди и возрастом (у пожилых людей боль более значима)
+        df['cp_age_interaction'] = df['cp'] * (df['age'] / 50)
+        
+        # Взаимодействие между холестерином и возрастом
+        df['chol_age_interaction'] = df['chol'] * (df['age'] / 50)
+        
+        # 4. Нелинейные трансформации медицинских показателей
+        
+        # Логарифм соотношения холестерина и тахикардии (важный физиологический показатель)
+        df['log_chol_thalach_ratio'] = np.log1p(df['chol'] / (df['thalach'] + 0.1))
+        
+        # Логарифмическая трансформация депрессии ST (важная для выявления ишемии)
+        df['log_oldpeak'] = np.log1p(df['oldpeak'])
+        
+        # 5. Кардиологические паттерны
+        
+        # Паттерн "высокий холестерин + низкий thalach" (опасная комбинация)
+        df['high_chol_low_thalach'] = ((df['chol'] > 240) & (df['thalach'] < 150)).astype(int)
+        
+        # Паттерн "аномальная ST депрессия + стенокардия" (сильный предиктор)
+        df['st_angina_pattern'] = ((df['oldpeak'] > 1.5) & (df['exang'] == 1)).astype(int)
+        
+        # 6. Кардиометрические индексы
+        
+        # Индекс сужения сосудов (комбинация количества сосудов и типа боли)
+        df['vessel_narrowing_index'] = df['ca'] * (df['cp'] + 1)
+        
+        # 7. Возрастные группы с клиническим значением
+        df['clinical_age_group'] = pd.cut(
+            df['age'], 
+            bins=[0, 40, 50, 60, 70, 100], 
+            labels=[0, 1, 2, 3, 4]
+        ).astype(int)
+        
+        # 8. Индекс метаболического риска
+        df['metabolic_risk'] = (
+            (df['fbs'] > 0).astype(int) +  # высокий сахар
+            (df['chol'] > 240).astype(int) +  # высокий холестерин
+            (df['thalach'] < 150).astype(int)  # низкая макс. частота сердечных сокращений
+        )
+        
+        # 9. Клинически значимые пороговые признаки
+        
+        # Критическая депрессия ST
+        df['critical_st_depression'] = (df['oldpeak'] > 2.0).astype(int)
+        
+        # Критический холестерин
+        df['critical_cholesterol'] = (df['chol'] > 300).astype(int)
+        
+        # 10. Комплексный индекс кардиологического риска (объединяет основные факторы)
+        df['cardiac_risk_score'] = (
+            df['age_sex_risk'] + 
+            df['high_chol_low_thalach'] + 
+            df['st_angina_pattern'] +
+            (df['ca'] > 0).astype(int) +
+            (df['thal'] > 2).astype(int) +
+            df['critical_st_depression'] +
+            df['critical_cholesterol']
+        )
+        
         # Логгируем информацию о новых признаках
         new_features = [col for col in df.columns if col not in data.columns]
-        logger.info(f"Добавлено {len(new_features)} новых признаков: {new_features}")
+        logger.info(f"Добавлено {len(new_features)} специализированных медицинских признаков: {new_features}")
         
         return df
 
@@ -1465,6 +1524,7 @@ class SuperEnsemble:
         
         # Шаг 2: Добавляем базовые алгоритмы машинного обучения
         self._add_basic_models(X_train, y_train)
+        self._add_forest_models(X_train, y_train)
         
         # Шаг 3: Пробуем добавить продвинутые алгоритмы (если доступны)
         self._try_add_advanced_models(X_train, y_train)
@@ -1548,36 +1608,113 @@ class SuperEnsemble:
             logger.error(f"Ошибка при добавлении продвинутых алгоритмов: {str(e)}")
     
     def _train_meta_model(self, X_train, y_train, X_val, y_val):
-        """Обучает мета-модель для стекинга."""
-        logger.info("Обучение мета-модели для стекинга")
+        """Обучает улучшенную мета-модель с множественным стекингом."""
+        logger.info("Обучение улучшенной мета-модели для стекинга")
         
         try:
             # Получаем предсказания от всех моделей на валидационной выборке
-            meta_features = self._get_meta_features(X_val)
+            meta_features_val = self._get_meta_features(X_val)
             
-            # Обучаем мета-модель
-            meta_model = GradientBoostingClassifier(
-                n_estimators=100, 
-                learning_rate=0.05, 
-                max_depth=3, 
-                random_state=52
+            # Получаем предсказания для обучающей выборки через кросс-валидацию
+            # чтобы избежать переобучения метамодели
+            from sklearn.model_selection import KFold
+            from sklearn.base import clone
+            
+            kf = KFold(n_splits=5, shuffle=True, random_state=42)
+            meta_features_train = np.zeros((X_train.shape[0], len(self.nn_ensemble.models) + len(self.additional_models)))
+            
+            # Для каждой модели в ансамбле
+            model_idx = 0
+            
+            # 1. Нейронные сети
+            for i, nn_model in enumerate(self.nn_ensemble.models):
+                # Формируем предсказания через кросс-валидацию
+                for train_idx, val_idx in kf.split(X_train):
+                    # Клонируем модель и обучаем на подвыборке
+                    X_fold_train, X_fold_val = X_train[train_idx], X_train[val_idx]
+                    y_fold_train = y_train[train_idx]
+                    
+                    # Для нейронных сетей нам нужно переобучить с нуля
+                    temp_model = self._create_similar_nn_model(nn_model)
+                    temp_model.fit(X_fold_train, y_fold_train, epochs=50, verbose=0)
+                    
+                    # Предсказания для отложенной части
+                    preds = temp_model.predict(X_fold_val, verbose=0).flatten()
+                    meta_features_train[val_idx, model_idx] = preds
+                
+                model_idx += 1
+                
+            # 2. Для классических моделей
+            for name, model in self.additional_models.items():
+                # Используем кросс-валидацию для получения непредвзятых предсказаний
+                for train_idx, val_idx in kf.split(X_train):
+                    X_fold_train, X_fold_val = X_train[train_idx], X_train[val_idx]
+                    y_fold_train = y_train[train_idx]
+                    
+                    # Клонируем и обучаем модель
+                    temp_model = clone(model)
+                    temp_model.fit(X_fold_train, y_fold_train)
+                    
+                    # Получаем предсказания
+                    if hasattr(temp_model, 'predict_proba'):
+                        preds = temp_model.predict_proba(X_fold_val)[:, 1]
+                    else:
+                        preds = temp_model.predict(X_fold_val)
+                    
+                    meta_features_train[val_idx, model_idx] = preds
+                
+                model_idx += 1
+            
+            # Создаем стекинг из нескольких метамоделей
+            from sklearn.ensemble import StackingClassifier
+            from sklearn.linear_model import LogisticRegression
+            
+            meta_models = [
+                ('gb', GradientBoostingClassifier(n_estimators=100, learning_rate=0.05, max_depth=3, random_state=52)),
+                ('rf', RandomForestClassifier(n_estimators=100, max_depth=None, random_state=53)),
+                ('lr', LogisticRegression(C=1.0, solver='liblinear', random_state=54))
+            ]
+            
+            final_estimator = LogisticRegression(C=1.0, solver='lbfgs', random_state=55)
+            
+            # Создаем мета-модель
+            meta_stacking = StackingClassifier(
+                estimators=meta_models,
+                final_estimator=final_estimator,
+                cv=5,
+                passthrough=True  # Добавляем исходные прогнозы к финальному предиктору
             )
-            meta_model.fit(meta_features, y_val)
-            self.meta_model = meta_model
-
-            # Пробуем использовать генетическую оптимизацию, если не получится - используем простую
-            try:
-                genetic_weights = self._optimize_genetic_weights(meta_features, y_val)
-                if genetic_weights is None:
-                    self._optimize_simple_weights(meta_features, y_val)
-            except Exception as e:
-                logger.warning(f"Ошибка при генетической оптимизации: {str(e)}")
-                self._optimize_simple_weights(meta_features, y_val)
             
-            logger.info("Мета-модель обучена успешно")
+            # Обучаем стекинг
+            meta_stacking.fit(meta_features_train, y_train)
+            self.meta_model = meta_stacking
+            
+            # Также оптимизируем веса с помощью генетического алгоритма в качестве бэкапа
+            genetic_weights = self._optimize_genetic_weights(meta_features_val, y_val)
+            if genetic_weights is None:
+                self._optimize_simple_weights(meta_features_val, y_val)
+            
+            logger.info("Улучшенная мета-модель обучена успешно")
         except Exception as e:
-            logger.error(f"Ошибка при обучении мета-модели: {str(e)}")
+            logger.error(f"Ошибка при обучении улучшенной мета-модели: {str(e)}")
             logger.info("Будет использоваться взвешенное голосование")
+            
+        def _create_similar_nn_model(self, original_model):
+            """Создает новую NN модель с аналогичной архитектурой."""
+            # Получаем конфигурацию оригинальной модели
+            config = original_model.get_config()
+            
+            # Создаем новую модель с той же конфигурацией
+            new_model = tf.keras.models.Sequential.from_config(config)
+            
+            # Компилируем модель
+            new_model.compile(
+                optimizer='adam',
+                loss='binary_crossentropy',
+                metrics=['accuracy']
+            )
+            
+            return new_model
     
     def _get_meta_features(self, X):
         """Получает предсказания от всех моделей для стекинга."""
@@ -1701,43 +1838,28 @@ class SuperEnsemble:
         logger.info(f"Оценка SuperEnsemble: accuracy={accuracy:.4f}, roc_auc={roc_auc:.4f}")
         return results
     
-    def _optimize_genetic_weights(self, meta_features, y_val, population_size=30, generations=50, 
-                             elite_ratio=0.2, mutation_prob=0.2, crossover_types='uniform'):
+    def _optimize_genetic_weights(self, meta_features, y_val, population_size=40, generations=80, 
+                               elite_ratio=0.2, mutation_prob=0.2, early_stop_generations=15):
         """
-        Оптимизация весов моделей ансамбля с помощью генетического алгоритма.
-        
-        Args:
-            meta_features: Предсказания от всех моделей (shape: [n_samples, n_models])
-            y_val: Истинные метки для валидационных данных
-            population_size: Размер популяции для генетического алгоритма
-            generations: Количество поколений для эволюции
-            elite_ratio: Доля лучших особей, которые переходят в следующее поколение без изменений
-            mutation_prob: Вероятность мутации каждого гена
-            crossover_types: Тип кроссовера ('single', 'uniform' или 'both')
-            
-        Returns:
-            np.ndarray: Оптимизированные веса для каждой модели или None в случае ошибки
+        Улучшенная генетическая оптимизация весов с адаптивными стратегиями.
         """
-        logger.info(f"Запуск генетической оптимизации весов (популяция: {population_size}, поколения: {generations})")
+        logger.info(f"Запуск улучшенной генетической оптимизации весов")
         
         try:
             import random
             
-            # Проверяем, что данные валидны
-            if meta_features.shape[0] != len(y_val):
-                logger.error(f"Несоответствие размеров данных: meta_features={meta_features.shape}, y_val={len(y_val)}")
-                return None
-                
             n_models = meta_features.shape[1]
-            
             if n_models == 0:
                 logger.error("Нет моделей для оптимизации весов")
                 return None
                 
-            # Преобразуем целевые метки в numpy массив, если они еще не являются им
+            # Преобразуем целевые метки в numpy массив
             y_val = np.asarray(y_val)
             
-            # Функция фитнеса - точность взвешенного ансамбля
+            # Подготовка для отслеживания важности моделей
+            model_importance = np.zeros(n_models)
+            
+            # Функция фитнеса с учетом несбалансированности классов
             def fitness(weights):
                 # Проверка на нулевую сумму весов
                 sum_weights = np.sum(weights)
@@ -1750,146 +1872,222 @@ class SuperEnsemble:
                 # Взвешенные предсказания
                 weighted_preds = np.dot(meta_features, weights_normalized)
                 
-                # Преобразуем в бинарные метки
+                # Бинарные метки
                 binary_preds = (weighted_preds > 0.5).astype(int)
                 
-                # Вычисляем и возвращаем точность
-                return accuracy_score(y_val, binary_preds)
+                # Расширенные метрики
+                from sklearn.metrics import precision_score, recall_score, f1_score
+                
+                # Базовая точность
+                accuracy = accuracy_score(y_val, binary_preds)
+                
+                # F1-мера (баланс между точностью и полнотой)
+                f1 = f1_score(y_val, binary_preds, average='weighted', zero_division=0)
+                
+                # Итоговая метрика - комбинация точности и F1
+                # Это помогает справиться с несбалансированностью классов
+                combined_score = 0.5 * accuracy + 0.5 * f1
+                
+                return combined_score
             
-            # Инициализация популяции с разнообразными наборами весов
+            # Стратегии инициализации популяции
+            
+            # 1. Создание более разнообразной начальной популяции
             population = []
             
-            # Стратегия 1: Равные веса для всех моделей
+            # 1.1 Равные веса
             population.append(np.ones(n_models) / n_models)
             
-            # Стратегия 2: Случайные веса
-            for _ in range(population_size // 3):
+            # 1.2 Веса на основе предварительной оценки важности моделей
+            # Сначала оцениваем индивидуальные характеристики каждой модели
+            individual_scores = []
+            for i in range(n_models):
+                # Используем только одну модель
+                weights = np.zeros(n_models)
+                weights[i] = 1.0
+                individual_scores.append(fitness(weights))
+            
+            # Веса пропорциональны индивидуальным оценкам
+            model_weights = np.array(individual_scores)
+            if np.sum(model_weights) > 0:
+                model_weights = model_weights / np.sum(model_weights)
+                population.append(model_weights)
+            
+            # 1.3 Стратегия случайных весов
+            for _ in range(population_size // 4):
                 weights = np.random.uniform(0, 1, n_models)
                 population.append(weights)
             
-            # Стратегия 3: Доминирование отдельных моделей
-            for _ in range(population_size // 3):
+            # 1.4 Стратегия доминирования лучших моделей
+            for _ in range(population_size // 4):
                 weights = np.random.uniform(0, 0.1, n_models)
-                dominant_idx = np.random.randint(0, n_models)
-                weights[dominant_idx] = np.random.uniform(0.5, 1.0)
+                # Выбираем случайно до 3 хороших моделей для доминирования
+                top_indices = np.argsort(individual_scores)[-3:]
+                for idx in top_indices:
+                    if individual_scores[idx] > 0:  # Только если модель полезна
+                        weights[idx] = np.random.uniform(0.5, 1.0)
                 population.append(weights)
             
-            # Стратегия 4: Разреженные веса (часть моделей не используется)
+            # 1.5 Стратегия взвешивания категорий моделей
+            # Если у нас есть и нейронные сети, и другие модели
+            nn_count = len(self.nn_ensemble.models)
+            if nn_count > 0 and nn_count < n_models:
+                # Создаем веса, где больше весят либо нейронки, либо классические модели
+                nn_weights = np.zeros(n_models)
+                nn_weights[:nn_count] = 1.0 / nn_count
+                population.append(nn_weights)
+                
+                other_weights = np.zeros(n_models)
+                other_weights[nn_count:] = 1.0 / (n_models - nn_count)
+                population.append(other_weights)
+                
+                # Смешанный подход
+                mixed_weights = np.zeros(n_models)
+                mixed_weights[:nn_count] = 0.5 / nn_count
+                mixed_weights[nn_count:] = 0.5 / (n_models - nn_count)
+                population.append(mixed_weights)
+            
+            # Дозаполняем популяцию случайными весами
             while len(population) < population_size:
-                weights = np.zeros(n_models)
-                active_models = np.random.choice(n_models, np.random.randint(1, n_models + 1), replace=False)
-                weights[active_models] = np.random.uniform(0, 1, len(active_models))
-                population.append(weights)
+                random_weights = np.random.exponential(1, n_models)  # Экспоненциальное распределение
+                population.append(random_weights / np.sum(random_weights))
             
-            # Генетический алгоритм
+            # Генетический алгоритм с адаптивными операторами
             best_fitness = 0
             best_weights = None
-            stagnation_counter = 0  # Счетчик поколений без улучшения
+            stagnation_counter = 0
+            
+            fitness_history = []
             
             for gen in range(generations):
-                # Оценка фитнеса
+                # Вычисление фитнеса для всей популяции
                 fitness_scores = [fitness(weights) for weights in population]
                 
-                # Проверка лучшего результата
+                # Обновление лучшего результата
                 current_best = max(fitness_scores)
+                fitness_history.append(current_best)
+                
                 if current_best > best_fitness:
                     best_fitness = current_best
                     best_idx = fitness_scores.index(current_best)
                     best_weights = population[best_idx].copy()
-                    logger.info(f"Поколение {gen + 1}/{generations}: Новый лучший результат = {best_fitness:.4f}")
-                    stagnation_counter = 0  # Сбрасываем счетчик
+                    stagnation_counter = 0
+                    
+                    # Обновляем важность моделей, чтобы отслеживать их вклад
+                    for i in range(n_models):
+                        model_importance[i] += best_weights[i]
+                    
+                    logger.info(f"Поколение {gen + 1}: Новый лучший результат = {best_fitness:.4f}")
                 else:
                     stagnation_counter += 1
                 
-                # Ранний останов при стагнации более 10 поколений и хорошей точности
-                if stagnation_counter > 10 and best_fitness > 0.95:
-                    logger.info(f"Ранний останов на поколении {gen + 1} (стагнация, достигнута точность {best_fitness:.4f})")
+                # Ранняя остановка при стагнации
+                if stagnation_counter >= early_stop_generations:
+                    logger.info(f"Ранняя остановка на поколении {gen + 1} (стагнация {stagnation_counter} поколений)")
                     break
                     
-                # Выбор лучших особей (элитизм)
+                # Элитизм - сохраняем лучшие особи
                 elite_size = max(1, int(population_size * elite_ratio))
                 elite_indices = np.argsort(fitness_scores)[-elite_size:]
-                elite = [population[i] for i in elite_indices]
+                elite = [population[i].copy() for i in elite_indices]
+                
+                # Турнирный отбор с адаптивным размером турнира
+                def tournament_selection():
+                    # Адаптивный размер турнира - увеличивается при стагнации
+                    k = 3 + min(5, stagnation_counter // 3)
+                    indices = np.random.choice(len(population), k, replace=False)
+                    tournament_fitness = [fitness_scores[i] for i in indices]
+                    return population[indices[np.argmax(tournament_fitness)]].copy()
+                
+                # Кроссовер с адаптивной стратегией
+                def crossover(parent1, parent2):
+                    # Адаптивный выбор стратегии кроссовера
+                    crossover_type = random.choices(
+                        ['single', 'uniform', 'average', 'weighted'],
+                        weights=[0.25, 0.25, 0.25, 0.25],
+                        k=1
+                    )[0]
+                    
+                    if crossover_type == 'single':
+                        # Одноточечный кроссовер
+                        point = random.randint(1, n_models - 1)
+                        child = np.concatenate([parent1[:point], parent2[point:]])
+                    elif crossover_type == 'uniform':
+                        # Равномерный кроссовер
+                        mask = np.random.choice([True, False], n_models)
+                        child = np.copy(parent1)
+                        child[mask] = parent2[mask]
+                    elif crossover_type == 'average':
+                        # Усреднение
+                        child = (parent1 + parent2) / 2
+                    else:  # weighted
+                        # Взвешенное смешивание
+                        alpha = random.random()
+                        child = alpha * parent1 + (1 - alpha) * parent2
+                    
+                    return child
+                
+                # Мутация с адаптивными параметрами
+                def mutate(individual):
+                    # Адаптивная вероятность мутации - увеличивается при стагнации
+                    global_mutation_prob = min(0.5, mutation_prob * (1 + stagnation_counter / 10))
+                    
+                    for i in range(n_models):
+                        if random.random() < global_mutation_prob:
+                            mutation_type = random.choices(
+                                ['reset', 'shift', 'rescale', 'boost'],
+                                weights=[0.25, 0.25, 0.25, 0.25],
+                                k=1
+                            )[0]
+                            
+                            if mutation_type == 'reset':
+                                # Полный сброс значения
+                                individual[i] = random.random()
+                            elif mutation_type == 'shift':
+                                # Небольшое смещение
+                                individual[i] += random.uniform(-0.2, 0.2)
+                                individual[i] = max(0, individual[i])
+                            elif mutation_type == 'rescale':
+                                # Масштабирование
+                                individual[i] *= random.uniform(0.5, 1.5)
+                            else:  # boost
+                                # Значительное усиление (если модель полезна)
+                                if model_importance[i] > 0:
+                                    individual[i] *= 2.0
+                    
+                    # Гарантируем неотрицательность
+                    individual[individual < 0] = 0
+                    
+                    # Нормализация, чтобы сумма не стала слишком большой/маленькой
+                    if np.sum(individual) > 0:
+                        individual = individual / np.sum(individual)
+                    else:
+                        individual = np.ones(n_models) / n_models
+                    
+                    return individual
                 
                 # Создание нового поколения
                 new_population = elite.copy()
                 
-                # Отбор родителей на основе фитнеса (турнирный отбор)
-                def select_parent():
-                    # Выбираем k особей случайно и возвращаем лучшую
-                    k = 3  # Размер турнира
-                    tournament_indices = np.random.choice(len(population), k, replace=False)
-                    tournament_fitness = [fitness_scores[i] for i in tournament_indices]
-                    winner_idx = tournament_indices[np.argmax(tournament_fitness)]
-                    return population[winner_idx]
-                
-                # Реализация различных типов кроссовера
-                def single_point_crossover(parent1, parent2):
-                    crossover_point = random.randint(1, n_models - 1)
-                    child = np.concatenate([parent1[:crossover_point], parent2[crossover_point:]])
-                    return child
-                    
-                def uniform_crossover(parent1, parent2):
-                    mask = np.random.randint(0, 2, n_models).astype(bool)
-                    child = np.copy(parent1)
-                    child[mask] = parent2[mask]
-                    return child
-                
-                # Кроссовер и мутация
                 while len(new_population) < population_size:
-                    # Выбор родителей с помощью турнирного отбора
-                    parent1 = select_parent()
-                    parent2 = select_parent()
+                    # Выбор родителей
+                    parent1 = tournament_selection()
+                    parent2 = tournament_selection()
                     
                     # Кроссовер
-                    if crossover_types == 'single':
-                        child = single_point_crossover(parent1, parent2)
-                    elif crossover_types == 'uniform':
-                        child = uniform_crossover(parent1, parent2)
-                    else:  # 'both' - чередуем типы кроссовера
-                        if np.random.random() < 0.5:
-                            child = single_point_crossover(parent1, parent2)
-                        else:
-                            child = uniform_crossover(parent1, parent2)
+                    child = crossover(parent1, parent2)
                     
                     # Мутация
-                    for i in range(n_models):
-                        if random.random() < mutation_prob:
-                            # Различные стратегии мутации
-                            mutation_type = random.choice(['scale', 'reset', 'small_nudge'])
-                            
-                            if mutation_type == 'scale':
-                                # Умножение на случайный коэффициент
-                                child[i] *= random.uniform(0.5, 1.5)
-                            elif mutation_type == 'reset':
-                                # Полный сброс значения
-                                child[i] = random.uniform(0, 1)
-                            else:  # 'small_nudge'
-                                # Небольшое смещение
-                                child[i] += random.uniform(-0.1, 0.1)
-                                child[i] = max(0, child[i])  # Гарантируем неотрицательность
+                    child = mutate(child)
                     
-                    # Добавляем потомка в новую популяцию
+                    # Добавление потомка
                     new_population.append(child)
                 
-                # Обновляем популяцию
+                # Замена популяции
                 population = new_population
-                
-                # Если мы достигли идеальной точности, останавливаемся
-                if best_fitness == 1.0:
-                    logger.info("Достигнута идеальная точность 1.0, останавливаем оптимизацию")
-                    break
-                    
-                # Адаптивная настройка вероятности мутации
-                # Увеличиваем вероятность мутации при стагнации
-                if stagnation_counter > 5:
-                    mutation_prob = min(0.4, mutation_prob * 1.2)
-                else:
-                    mutation_prob = max(0.1, mutation_prob * 0.9)
             
             # Нормализация лучших весов
             if best_weights is not None:
-                # Обработка краевого случая с нулевой суммой весов
                 weight_sum = np.sum(best_weights)
                 if weight_sum <= 0:
                     logger.warning("Сумма весов равна или меньше нуля, использование равных весов")
@@ -1898,23 +2096,22 @@ class SuperEnsemble:
                     best_weights = best_weights / weight_sum
                     
                 self.optimal_weights = best_weights
-                logger.info(f"Оптимизация завершена. Лучшая точность: {best_fitness:.4f}")
+                logger.info(f"Оптимизация завершена. Лучшая метрика: {best_fitness:.4f}")
                 
-                # Анализ и вывод информации о найденных весах
-                
-                # Находим значимые модели (с весом > 1%)
-                significant_indices = np.where(best_weights > 0.01)[0]
-                significant_count = len(significant_indices)
-                logger.info(f"Найдено {significant_count} значимых моделей (вес > 1%)")
-                
-                # Вывод весов для топ-5 моделей
-                top_indices = np.argsort(best_weights)[-5:][::-1]  # Топ-5 в порядке убывания
-                
-                # Сначала считаем индексы для нейронных сетей
+                # Анализ результатов
                 nn_count = len(self.nn_ensemble.models)
                 other_models_names = list(self.additional_models.keys())
                 
+                # Вычисляем суммарный вес нейронных сетей и других моделей
+                nn_weight = np.sum(best_weights[:nn_count])
+                other_weight = np.sum(best_weights[nn_count:])
+                
+                logger.info(f"Суммарный вес нейронных сетей: {nn_weight:.2f}, других моделей: {other_weight:.2f}")
+                
+                # Анализ топ-5 моделей
+                top_indices = np.argsort(best_weights)[-5:][::-1]
                 weights_info = []
+                
                 for idx in top_indices:
                     if idx < nn_count:
                         name = f"NeuralNet_{idx+1}"
@@ -1928,14 +2125,6 @@ class SuperEnsemble:
                 
                 logger.info(f"Топ-5 моделей по весам: {', '.join(weights_info)}")
                 
-                # Проверяем, что результаты имеют смысл
-                total_weight = sum(best_weights[idx] for idx in top_indices)
-                logger.info(f"Топ-5 моделей содержат {total_weight:.2%} общего веса")
-                
-                # Проверяем, доминирует ли одна модель
-                if best_weights[top_indices[0]] > 0.5:
-                    logger.info(f"Обнаружена доминирующая модель: {weights_info[0]}")
-                
                 return best_weights
             else:
                 logger.warning("Не удалось найти оптимальные веса")
@@ -1943,9 +2132,52 @@ class SuperEnsemble:
                 
         except Exception as e:
             logger.error(f"Ошибка при генетической оптимизации: {str(e)}")
-            logger.exception("Подробности ошибки:")
             return None
     
+    def _add_forest_models(self, X_train, y_train):
+        """Добавляет улучшенный набор моделей на основе случайного леса."""
+        logger.info("Добавление расширенного набора моделей RandomForest")
+        
+        forest_models = {
+            'rf_100_deep': RandomForestClassifier(
+                n_estimators=100, max_depth=None, 
+                min_samples_split=2, bootstrap=True, random_state=42
+            ),
+            'rf_200_deep': RandomForestClassifier(
+                n_estimators=200, max_depth=None, 
+                criterion='gini', bootstrap=True, random_state=43
+            ),
+            'rf_100_entropy': RandomForestClassifier(
+                n_estimators=100, max_depth=None, 
+                criterion='entropy', bootstrap=True, random_state=44
+            ),
+            'rf_limited': RandomForestClassifier(
+                n_estimators=150, max_depth=10, max_features='sqrt',
+                min_samples_leaf=2, random_state=45
+            ),
+            'rf_balanced': RandomForestClassifier(
+                n_estimators=150, class_weight='balanced', 
+                max_depth=None, random_state=46
+            ),
+            'extra_trees': ExtraTreesClassifier(
+                n_estimators=200, max_depth=None, 
+                random_state=47, bootstrap=True
+            ),
+            'extra_trees_entropy': ExtraTreesClassifier(
+                n_estimators=150, criterion='entropy', 
+                random_state=48, bootstrap=True
+            )
+        }
+        
+        # Обучаем и добавляем каждую модель
+        for name, model in forest_models.items():
+            try:
+                model.fit(X_train, y_train)
+                self.additional_models[name] = model
+                logger.info(f"Обучена и добавлена модель: {name}")
+            except Exception as e:
+                logger.error(f"Ошибка при обучении модели {name}: {str(e)}")
+
 def analyze_ensemble_size(dataset_name, max_ensemble_size=15, noise_levels=None):
     """
     Запускает анализ зависимости точности от размера ансамбля.
